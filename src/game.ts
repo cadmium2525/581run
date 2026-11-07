@@ -15,11 +15,11 @@ export const X_LIMIT = 400; // 横方向の移動限界（実質無限のグラ�
 
 // 群衆（ゲーム的に圧縮した 581 万人の流れ）
 export const FRONT0 = 46; // 先頭の初期位置
-export const FRONT_V = 2.3; // 先頭の速さ
+export const FRONT_V = 2.45; // 先頭の速さ
 export const BACK0 = 1.4; // 最後尾（プレイヤーの 1 つ前）の初期位置
 export const BACK_V = 1.5;
 const RANK_K = 3; // 順位カーブ（先頭付近ほど人がまばら）
-export const DENS_MAX = 0.66; // 最後尾付近の密度 (人/m²)
+export const DENS_MAX = 0.78; // 最後尾付近の密度 (人/m²)
 
 // 判定ウィンドウ（この中の子だけ個別に動かす）
 export const NEAR_HW = 11; // 横方向の半幅
@@ -140,7 +140,7 @@ export class Game {
   private readonly cellNext: Int32Array;
   private gridX0 = 0;
   private gridZ0 = 0;
-  static readonly POOL = 900;
+  static readonly POOL = 1100;
   static readonly GRID_COLS = NEAR_HW * 2 + 6;
   static readonly GRID_ROWS = AHEAD + BEHIND + 8;
 
@@ -567,7 +567,7 @@ export class Game {
         if (Math.abs(input.steer) > 0.25) {
           p.sideT = 0.2;
           p.sideDir = Math.sign(input.steer);
-          p.iframe = Math.max(p.iframe, 0.3);
+          p.iframe = Math.max(p.iframe, 0.2);
           this.events.push({ type: 'sidestep' });
         } else {
           p.hopT = HOP_TIME;
@@ -614,7 +614,7 @@ export class Game {
         const ez = p.z - hz;
         if (ex * ex + ez * ez < 0.6 * 0.6 && p.y < 0.22 && p.iframe <= 0 && n.bumpCd <= 0) {
           n.bumpCd = 0.7;
-          this.hitBalance(46);
+          this.hitBalance(55);
           p.v *= 0.45;
           p.wobble = 1;
           this.events.push({ type: 'trip', x: n.x, z: n.z });
@@ -636,7 +636,7 @@ export class Game {
       if (p.iframe <= 0 && n.bumpCd <= 0) {
         n.bumpCd = 0.5;
         p.bumps++;
-        this.hitBalance(n.state === NState.Stumble ? 26 : 15);
+        this.hitBalance(n.state === NState.Stumble ? 30 : 20);
         p.wobble = 0.6;
         this.events.push({ type: 'bump', x: n.x, z: n.z });
         // ぶつかられた子もよろける → 連鎖のきっかけ
@@ -644,7 +644,7 @@ export class Game {
       }
     });
 
-    if (p.balanceCd <= 0) p.balance = Math.min(100, p.balance + 11 * DT);
+    if (p.balanceCd <= 0) p.balance = Math.min(100, p.balance + 9 * DT);
     if (p.balance <= 0) {
       p.state = PState.Fallen;
       p.t = 1.25;
@@ -658,6 +658,6 @@ export class Game {
   private hitBalance(amount: number) {
     const p = this.player;
     p.balance = Math.max(0, p.balance - amount);
-    p.balanceCd = 1.0;
+    p.balanceCd = 1.2;
   }
 }
