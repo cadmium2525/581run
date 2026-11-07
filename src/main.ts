@@ -4,6 +4,7 @@ import { Renderer, type Quality } from './render';
 import { Input } from './input';
 import { Sfx } from './audio';
 import { hashString, todayJST } from './rng';
+import bgmUrl from './assets/bgm.mp3';
 
 type Mode = 'daily' | 'free';
 type Scene = 'title' | 'countdown' | 'race' | 'paused' | 'result';
@@ -37,8 +38,15 @@ const sfx = new Sfx();
 
 let quality = (store.get('quality') as Quality) || 'auto';
 let soundOn = store.get('sound') !== 'off';
+let bgmOn = store.get('bgm') !== 'off';
 renderer.setQuality(quality);
 sfx.setEnabled(soundOn);
+sfx.setBgmEnabled(bgmOn);
+sfx.preloadBgm(bgmUrl);
+
+const GAME_URL = location.origin + location.pathname.replace(/index\.html$/, '');
+let cardBlob: Blob | null = null;
+let cardUrl = '';
 
 let mode: Mode = 'daily';
 let seed = 0;
@@ -82,6 +90,7 @@ function newGame(m: Mode) {
   dateKey = todayJST();
   seed = m === 'daily' ? hashString('581run-' + dateKey) : (Math.random() * 2 ** 31) >>> 0;
   game = new Game(seed);
+  if (import.meta.env.DEV) Object.assign(window, { __game: game, __renderer: renderer }); // 開発時のテスト用
   renderer.snapCamera(game);
   acc = 0;
   lastStepBeat = 0;
@@ -92,6 +101,7 @@ function newGame(m: Mode) {
 function startRace(m: Mode) {
   sfx.unlock();
   newGame(m);
+  sfx.stopBgm(0.2);
   scene = 'countdown';
   countdownT = 3.0;
   lastCount = 4;
@@ -113,12 +123,18 @@ function pause() {
   scene = 'paused';
   show('pause');
   sfx.setCrowd(0);
+  sfx.pauseBgm();
 }
 function resume() {
   if (scene !== 'paused') return;
   scene = game.started ? 'race' : 'countdown';
   acc = 0;
   show(null);
+  if (game.started) {
+    sfx.unlock();
+    sfx.setCrowd(1);
+    sfx.playBgm();
+  }
 }
 
 const MILESTONES = [1_000_000, 100_000, 10_000, 1_000, 100, 10];
@@ -180,9 +196,12 @@ function handleEvents() {
 function finishRace() {
   scene = 'result';
   sfx.setCrowd(0.3);
+  sfx.stopBgm(0.8);
   const t = game.time;
   const cleared = game.cleared;
   sfx.fanfare(cleared);
+  // シェア画像（ゴールの瞬間を正面から撮った写真＋記録）
+  const shot = renderer.snapshot(game);
   let isNew = false;
   if (cleared) {
     const keys = ['best.all'];
@@ -210,39 +229,130 @@ function finishRace() {
     ? `5,812,374人をぜんぶ抜いた！`
     : `${fmtRank(passed)}人抜き！ 先頭より先にゴールすればクリア。もう一回！`;
   $('shareNote').textContent = '';
+  makeCard(shot, best, isNew);
   setTimeout(() => {
     if (scene === 'result') show('result');
   }, 900);
 }
 
-function shareText(): string {
-  const t = fmtTime(game.time);
-  const where = mode === 'daily' ? `【今日のレース ${dateKey.replace(/-/g, '/')}】` : '【フリーラン】';
-  const body = game.cleared
-    ? `5,812,375位から1位に！ タイム ${t}秒（転倒${game.player.falls}回）`
-    : `5,812,375位から${fmtRank(game.finishRank)}位まで追い上げた！（${t}秒）`;
-  return `581万人100m走 ${where}\n${body}\n#581万人100m走`;
+function modeLabel(): string {
+  return mode === 'daily' ? `今日のレース ${dateKey.replace(/-/g, '/')}` : 'フリーラン';
 }
 
+/** 投稿文（記録・URL・タグ） */
+function shareText(): string {
+  const t = fmtTime(game.time);
+  const body = game.cleared
+    ? `5,812,375位から1位でゴール！\nタイム ${t}秒（転倒${game.player.falls}回）`
+    : `5,812,375位から${fmtRank(game.finishRank)}位まで追い上げた！\nタイム ${t}秒（転倒${game.player.falls}回）`;
+  return `581万人100m走【${modeLabel()}】\n${body}\n${GAME_URL}\n#581万人100m走`;
+}
+
+/** 結果画像（1200×630） */
+function makeCard(shot: HTMLCanvasElement, best: string | null, isNew: boolean) {
+  cardBlob = null;
+  $<HTMLButtonElement>('shareBtn').disabled = true;
+  $<HTMLButtonElement>('saveBtn').disabled = true;
+  const W = 1200;
+  const H = 630;
+  const c = document.createElement('canvas');
+  c.width = W;
+  c.height = H;
+  const g = c.getContext('2d')!;
+  g.drawImage(shot, 0, 0, W, H);
+  const grad = g.createLinearGradient(0, 0, W * 0.75, 0);
+  grad.addColorStop(0, 'rgba(14,20,48,0.86)');
+  grad.addColorStop(0.55, 'rgba(14,20,48,0.55)');
+  grad.addColorStop(1, 'rgba(14,20,48,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, W, H);
+  const font = (size: number, weight = 900) =>
+    `${weight} ${size}px "Hiragino Kaku Gothic ProN","Hiragino Sans","Noto Sans JP","Yu Gothic",Meiryo,sans-serif`;
+  const text = (s: string, x: number, y: number, size: number, color: string, weight = 900) => {
+    g.font = font(size, weight);
+    g.fillStyle = color;
+    g.fillText(s, x, y);
+    return g.measureText(s).width;
+  };
+  g.textBaseline = 'alphabetic';
+  const X = 60;
+  let w = text('581', X, 108, 76, '#ff5a36');
+  w += text('万人', X + w + 4, 108, 44, '#ffffff');
+  text('100m走', X + w + 12, 108, 44, '#ffffff');
+  text(modeLabel(), X, 156, 26, '#c9d4ff', 700);
+  text(game.cleared ? '1位でゴール！' : `${fmtRank(game.finishRank)}位でゴール`, X, 238, 52, game.cleared ? '#ffd23f' : '#ffffff');
+  w = text(fmtTime(game.time), X, 372, 132, '#ffffff');
+  text('秒', X + w + 10, 372, 44, '#ffffff');
+  text(`5,812,375位 → ${fmtRank(game.finishRank)}位`, X, 440, 34, '#ffffff', 700);
+  let line = `転倒 ${game.player.falls}回`;
+  if (best) line += `　自己ベスト ${best}秒`;
+  text(line, X, 490, 28, '#c9d4ff', 700);
+  if (isNew) {
+    g.fillStyle = '#ffc21a';
+    if (g.roundRect) {
+      g.beginPath();
+      g.roundRect(X, 512, 236, 46, 10);
+      g.fill();
+    } else g.fillRect(X, 512, 236, 46);
+    text('自己ベスト更新！', X + 16, 546, 28, '#1c2340');
+  }
+  text('#581万人100m走', X, 600, 26, '#ffffff', 700);
+  g.textAlign = 'right';
+  text(GAME_URL.replace(/^https?:\/\//, ''), W - 30, 600, 22, 'rgba(255,255,255,0.85)', 700);
+  g.textAlign = 'left';
+  c.toBlob((b) => {
+    if (!b) return;
+    cardBlob = b;
+    if (cardUrl) URL.revokeObjectURL(cardUrl);
+    cardUrl = URL.createObjectURL(b);
+    const img = $<HTMLImageElement>('resCard');
+    img.src = cardUrl;
+    img.classList.remove('hidden');
+    $<HTMLButtonElement>('shareBtn').disabled = false;
+    $<HTMLButtonElement>('saveBtn').disabled = false;
+  }, 'image/png');
+}
+
+function cardFile(): File | null {
+  return cardBlob ? new File([cardBlob], `581run-${fmtTime(game.time)}.png`, { type: 'image/png' }) : null;
+}
+
+function saveCard() {
+  if (!cardUrl) return;
+  const a = document.createElement('a');
+  a.href = cardUrl;
+  a.download = `581run-${fmtTime(game.time)}.png`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/**
+ * 共有：対応端末（iPhone / Android など）は共有シートに「画像＋投稿文」を渡す。
+ * 非対応（PC など）は X の投稿画面を投稿文入りで開き、画像を保存する（X の投稿画面には画像を自動で添付できないため）。
+ * どちらの場合も投稿文はクリップボードにもコピーしておく（アプリによって文章が消えることがあるため）。
+ */
 async function share() {
   const text = shareText();
-  const url = location.href.split('#')[0].split('?')[0];
-  try {
-    if (navigator.share) {
-      await navigator.share({ text, url });
+  const note = $('shareNote');
+  let copied = false;
+  navigator.clipboard
+    ?.writeText(text)
+    .then(() => (copied = true))
+    .catch(() => {});
+  const file = cardFile();
+  if (file && navigator.canShare?.({ files: [file], text })) {
+    try {
+      await navigator.share({ files: [file], text });
+      note.textContent = copied ? '投稿文はコピー済みです。文章が入っていなければ貼り付けてください' : '';
       return;
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') return;
     }
-  } catch {
-    return; // キャンセル
   }
-  const intent = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`;
-  window.open(intent, '_blank', 'noopener');
-  try {
-    await navigator.clipboard.writeText(`${text}\n${url}`);
-    $('shareNote').textContent = '結果をクリップボードにコピーしました';
-  } catch {
-    /* noop */
-  }
+  window.open(`https://x.com/intent/post?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
+  saveCard();
+  note.textContent = '画像を保存しました。投稿画面で画像を添付してください';
 }
 
 function updateHud() {
@@ -278,6 +388,7 @@ function frame(now: number) {
       $('countdown').textContent = 'GO!';
       sfx.pistol();
       sfx.setCrowd(1);
+      sfx.playBgm(true);
       setTimeout(() => {
         if ($('countdown').textContent === 'GO!') $('countdown').textContent = '';
       }, 700);
@@ -320,6 +431,7 @@ $('pauseBtn').addEventListener('pointerdown', (e) => {
 const toTitle = () => {
   scene = 'title';
   sfx.setCrowd(0);
+  sfx.stopBgm(0.3);
   newGame('daily');
   refreshTitle();
   show('title');
@@ -327,6 +439,7 @@ const toTitle = () => {
 $('toTitleBtn').onclick = toTitle;
 $('resTitleBtn').onclick = toTitle;
 $('shareBtn').onclick = () => void share();
+$('saveBtn').onclick = saveCard;
 $('howBtn').onclick = () => show('how');
 $('settingsBtn').onclick = () => {
   syncSettings();
@@ -336,13 +449,32 @@ document.querySelectorAll('.back').forEach((b) => ((b as HTMLElement).onclick = 
 
 function syncSettings() {
   document.querySelectorAll('#qualitySeg button').forEach((b) => b.classList.toggle('on', (b as HTMLElement).dataset.v === quality));
-  document.querySelectorAll('#soundSeg button').forEach((b) => b.classList.toggle('on', ((b as HTMLElement).dataset.v === 'on') === soundOn));
+  document.querySelectorAll('#bgmSeg button').forEach((b) =>
+  b.addEventListener('click', () => {
+    bgmOn = (b as HTMLElement).dataset.v === 'on';
+    store.set('bgm', bgmOn ? 'on' : 'off');
+    sfx.unlock();
+    sfx.setBgmEnabled(bgmOn);
+    syncSettings();
+  }),
+);
+document.querySelectorAll('#soundSeg button').forEach((b) => b.classList.toggle('on', ((b as HTMLElement).dataset.v === 'on') === soundOn));
+  document.querySelectorAll('#bgmSeg button').forEach((b) => b.classList.toggle('on', ((b as HTMLElement).dataset.v === 'on') === bgmOn));
 }
 document.querySelectorAll('#qualitySeg button').forEach((b) =>
   b.addEventListener('click', () => {
     quality = (b as HTMLElement).dataset.v as Quality;
     store.set('quality', quality);
     renderer.setQuality(quality);
+    syncSettings();
+  }),
+);
+document.querySelectorAll('#bgmSeg button').forEach((b) =>
+  b.addEventListener('click', () => {
+    bgmOn = (b as HTMLElement).dataset.v === 'on';
+    store.set('bgm', bgmOn ? 'on' : 'off');
+    sfx.unlock();
+    sfx.setBgmEnabled(bgmOn);
     syncSettings();
   }),
 );

@@ -1,10 +1,111 @@
-/** 効果音はすべて Web Audio でその場合成（素材費 0 円・外部ファイルなし） */
+/**
+ * 効果音は Web Audio でその場合成（素材費 0 円）。
+ * BGM（天国と地獄風ギャロップ）は scripts/bgm/ の曲 JSON から「かなでる」で書き出した MP3 をループ再生する。
+ */
+const BGM_LOOP_SEC = (96 * 60) / 176; // 48 小節（2/4 拍子・176 BPM）
+
 export class Sfx {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private crowd: GainNode | null = null;
   private noiseBuf: AudioBuffer | null = null;
   enabled = true;
+  bgmEnabled = true;
+  private bgmBytes: Promise<ArrayBuffer> | null = null;
+  private bgmBuf: AudioBuffer | null = null;
+  private bgmLoopStart = 0;
+  private bgmGain: GainNode | null = null;
+  private bgmSrc: AudioBufferSourceNode | null = null;
+  private bgmStartedAt = 0;
+  private bgmOffset = 0;
+  private bgmWanted = false;
+
+  /** BGM のファイルを先に読み込んでおく（デコードは AudioContext ができてから） */
+  preloadBgm(url: string) {
+    this.bgmBytes = fetch(url)
+      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(String(r.status)))))
+      .catch(() => new ArrayBuffer(0));
+  }
+
+  private async decodeBgm() {
+    if (this.bgmBuf || !this.ctx || !this.bgmBytes) return;
+    const bytes = await this.bgmBytes;
+    if (!bytes.byteLength || this.bgmBuf) return;
+    try {
+      const buf = await this.ctx.decodeAudioData(bytes.slice(0));
+      // MP3 の先頭の無音（エンコーダー遅延）を飛ばしてループ位置を決める
+      const d = buf.getChannelData(0);
+      let i = 0;
+      while (i < d.length && Math.abs(d[i]) < 0.003) i++;
+      this.bgmLoopStart = i / buf.sampleRate;
+      this.bgmBuf = buf;
+      if (this.bgmWanted && !this.bgmSrc) this.playBgm();
+    } catch {
+      /* 再生できない形式なら BGM なしで続行 */
+    }
+  }
+
+  /** BGM を再生（一時停止した位置から再開） */
+  playBgm(fromStart = false) {
+    this.bgmWanted = true;
+    if (fromStart) this.bgmOffset = 0;
+    if (!this.ctx || !this.bgmGain) return;
+    if (!this.bgmBuf) {
+      void this.decodeBgm();
+      return;
+    }
+    this.stopSource();
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.bgmBuf;
+    src.loop = true;
+    src.loopStart = this.bgmLoopStart;
+    src.loopEnd = Math.min(this.bgmBuf.duration, this.bgmLoopStart + BGM_LOOP_SEC);
+    src.connect(this.bgmGain);
+    this.bgmGain.gain.cancelScheduledValues(this.ctx.currentTime);
+    this.bgmGain.gain.setValueAtTime(this.bgmEnabled ? 0.55 : 0, this.ctx.currentTime);
+    src.start(0, this.bgmLoopStart + this.bgmOffset);
+    this.bgmSrc = src;
+    this.bgmStartedAt = this.ctx.currentTime - this.bgmOffset;
+  }
+
+  private stopSource() {
+    if (this.bgmSrc) {
+      try {
+        this.bgmSrc.stop();
+      } catch {
+        /* noop */
+      }
+      this.bgmSrc.disconnect();
+      this.bgmSrc = null;
+    }
+  }
+
+  /** 一時停止（位置を覚えておく） */
+  pauseBgm() {
+    this.bgmWanted = false;
+    if (!this.ctx || !this.bgmSrc) return;
+    this.bgmOffset = (this.ctx.currentTime - this.bgmStartedAt) % BGM_LOOP_SEC;
+    this.stopSource();
+  }
+
+  /** フェードアウトして止める */
+  stopBgm(fade = 0.6) {
+    this.bgmWanted = false;
+    this.bgmOffset = 0;
+    if (!this.ctx || !this.bgmGain || !this.bgmSrc) return;
+    const t = this.ctx.currentTime;
+    this.bgmGain.gain.cancelScheduledValues(t);
+    this.bgmGain.gain.setValueAtTime(this.bgmGain.gain.value, t);
+    this.bgmGain.gain.linearRampToValueAtTime(0, t + fade);
+    const src = this.bgmSrc;
+    this.bgmSrc = null;
+    src.stop(t + fade + 0.05);
+  }
+
+  setBgmEnabled(on: boolean) {
+    this.bgmEnabled = on;
+    if (this.ctx && this.bgmGain && this.bgmSrc) this.bgmGain.gain.setTargetAtTime(on ? 0.55 : 0, this.ctx.currentTime, 0.05);
+  }
 
   /** ユーザー操作の中で呼ぶ（iOS の自動再生制限対策） */
   unlock() {
@@ -31,6 +132,10 @@ export class Sfx {
       this.crowd.gain.value = 0;
       src.connect(bp).connect(this.crowd).connect(this.master);
       src.start();
+      this.bgmGain = this.ctx.createGain();
+      this.bgmGain.gain.value = 0;
+      this.bgmGain.connect(this.ctx.destination);
+      void this.decodeBgm();
     }
     if (this.ctx.state === 'suspended') void this.ctx.resume();
   }
@@ -42,7 +147,7 @@ export class Sfx {
 
   setCrowd(level: number) {
     if (!this.ctx || !this.crowd) return;
-    this.crowd.gain.setTargetAtTime(level * 0.18, this.ctx.currentTime, 0.3);
+    this.crowd.gain.setTargetAtTime(level * 0.1, this.ctx.currentTime, 0.3);
   }
 
   private tone(freq: number, dur: number, type: OscillatorType, vol: number, slideTo?: number, delay = 0) {

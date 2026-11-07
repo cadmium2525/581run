@@ -400,7 +400,7 @@ export class Renderer {
     const poles = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.1, 0.1, 3.2, 6), new THREE.MeshLambertMaterial({ color: 0xffffff }), poleCount);
     const flags = new THREE.InstancedMesh(new THREE.PlaneGeometry(1.4, 0.8), new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }), poleCount);
     for (let i = 0; i < poleCount; i++) {
-      const x = (i - (poleCount - 1) / 2) * 12;
+      const x = (i - (poleCount - 1) / 2) * 12 + 6; // プレイヤーの正面（x=0）にポールが来ないよう半分ずらす
       _m.makeTranslation(x, 1.6, COURSE);
       poles.setMatrixAt(i, _m);
       _m.makeTranslation(x + 0.7, 2.8, COURSE);
@@ -810,6 +810,35 @@ export class Renderer {
     this.camera.lookAt(this.camLook);
 
     this.renderer.render(this.scene, this.camera);
+  }
+
+  /**
+   * シェア用の写真：プレイヤーの正面から、後ろに続く大群衆ごと撮る。
+   * WebGL の描画直後に同じタスク内でコピーするので preserveDrawingBuffer は不要。
+   */
+  snapshot(game: Game, w = 1200, h = 630): HTMLCanvasElement {
+    const p = game.player;
+    const cam = new THREE.PerspectiveCamera(48, w / h, 0.1, 1600);
+    cam.position.set(-p.x - 1.6, 3.6, p.z + 5.6);
+    cam.lookAt(-p.x + 0.7, 0.7, p.z - 7);
+    const ratio = this.renderer.getPixelRatio();
+    const uScale = this.farMat.uniforms.uScale.value;
+    this.playerMarker.visible = false;
+    this.playerRing.visible = false;
+    this.renderer.setPixelRatio(1);
+    this.renderer.setSize(w, h, false);
+    this.farMat.uniforms.uScale.value = h * 0.9;
+    this.renderer.render(this.scene, cam);
+    const out = document.createElement('canvas');
+    out.width = w;
+    out.height = h;
+    out.getContext('2d')!.drawImage(this.renderer.domElement, 0, 0, w, h);
+    this.playerMarker.visible = true;
+    this.playerRing.visible = true;
+    this.farMat.uniforms.uScale.value = uScale;
+    this.renderer.setPixelRatio(ratio);
+    this.renderer.setSize(this.width, this.height, false);
+    return out;
   }
 
   /** リトライ時にカメラを即座に移動 */

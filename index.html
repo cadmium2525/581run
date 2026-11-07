@@ -93,6 +93,10 @@
           </div>
         </div>
         <div class="setting">
+          <label>BGM</label>
+          <div class="seg" id="bgmSeg"><button data-v="on">ON</button><button data-v="off">OFF</button></div>
+        </div>
+        <div class="setting">
           <label>効果音</label>
           <div class="seg" id="soundSeg"><button data-v="on">ON</button><button data-v="off">OFF</button></div>
         </div>
@@ -124,12 +128,14 @@
           <div><dt>自己ベスト</dt><dd id="resBest">-</dd></div>
         </dl>
         <p class="res-msg" id="resMsg"></p>
-        <button id="againBtn" class="btn primary">もう一回 <small>(R)</small></button>
+        <img id="resCard" class="res-card hidden" alt="結果画像" />
         <div class="row">
-          <button id="shareBtn" class="btn small">結果をシェア</button>
-          <button id="resTitleBtn" class="btn small">タイトル</button>
+          <button id="shareBtn" class="btn small share">結果をシェア</button>
+          <button id="saveBtn" class="btn small">画像を保存</button>
         </div>
         <p class="note" id="shareNote"></p>
+        <button id="againBtn" class="btn primary">もう一回 <small>(R)</small></button>
+        <button id="resTitleBtn" class="btn small">タイトル</button>
       </div>
     </div>
 

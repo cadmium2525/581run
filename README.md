@@ -22,7 +22,11 @@
 - 頭上に「！」が出た子は転びそう。赤い輪は転んだ子の危険ゾーン。転倒は後ろの子へ連鎖する
 - **今日のレース**：日付（日本時間）から決まる固定シード。同じ日なら誰でも同じ配置なので、SNS でタイムを比べられます
 - **フリーラン**：毎回ランダムな配置
-- 結果画面の「結果をシェア」で、端末の共有メニュー（非対応なら X の投稿画面＋クリップボード）にタイムを渡せます
+- 結果画面の「結果をシェア」で、**投稿文（記録・URL・ハッシュタグ）と結果画像**をまとめて共有できます
+  - スマホ：共有シートに画像＋投稿文を渡す（X・LINE・Instagram などを選べる）。投稿文はクリップボードにもコピー
+  - PC：X の投稿画面を投稿文入りで開き、結果画像を保存（X の投稿画面には画像を自動添付できないため、保存した画像を添付）
+  - 結果画像はゴールの瞬間を正面から撮った写真（後ろに大群衆）にタイム・順位・転倒回数を重ねた 1200×630 の PNG
+- BGM は「天国と地獄」（オッフェンバック、1858 年・パブリックドメイン）風のギャロップ。設定で ON/OFF できます
 - 自己ベストは端末内（localStorage）にのみ保存。サーバーへは何も送信しません
 
 ## 開発
@@ -34,6 +38,14 @@ npm run build    # dist/ に静的ファイルを出力
 npm run balance  # ボットで難易度を確認（クリア率・平均タイム）
 ```
 
+BGM を作り直すとき（[mp4mp3](https://github.com/cadmium2525/mp4mp3) を隣に clone しておく）：
+
+```bash
+node scripts/bgm/galop.gen.mjs > scripts/bgm/galop.json
+node ../mp4mp3/daw/tools/render.mjs scripts/bgm/galop.json /tmp/galop.wav --report --sheet /tmp/galop.png
+ffmpeg -y -i /tmp/galop.wav -b:a 112k -ar 44100 src/assets/bgm.mp3
+```
+
 構成：TypeScript / Vite / Three.js（WebGL）
 
 | ファイル | 役割 |
@@ -41,7 +53,8 @@ npm run balance  # ボットで難易度を確認（クリア率・平均タイ�
 | `src/game.ts` | ゲーム進行。固定タイムステップ (1/60 秒)・シード付き乱数・軽量衝突判定・転倒連鎖・順位計算 |
 | `src/render.ts` | 描画。近景＝パーツ分けした低ポリ児童（InstancedMesh）、中景＝数千人の簡易人型（GPU で移動・走りアニメ）、遠景＝地平線まで続く GPU 点群の 3 段階 LOD。画質 低/自動/高 |
 | `src/input.ts` | キーボード／タッチ入力 |
-| `src/audio.ts` | 効果音（Web Audio でその場合成。音声ファイルなし） |
+| `src/audio.ts` | 効果音（Web Audio でその場合成）と BGM のループ再生 |
+| `scripts/bgm/` | BGM の曲データ。`galop.gen.mjs` が [かなでる](https://github.com/cadmium2525/mp4mp3)（`daw/`）の曲 JSON を作り、そのツールで `src/assets/bgm.mp3` に書き出す |
 | `src/main.ts` | 画面遷移・HUD・自己ベスト・シェア |
 
 ### 581万人をどう扱っているか
