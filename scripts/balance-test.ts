@@ -1,4 +1,4 @@
-// 簡易ボットで難易度を確認する (npx vite-node 不要: esbuild で実行)
+// 簡易ボットで難易度を確認する（npm run balance）
 import { Game, NState, COURSE } from '../src/game';
 function bot(g: Game, smart: boolean) {
   const p = g.player;
@@ -19,12 +19,16 @@ function bot(g: Game, smart: boolean) {
   return { steer: smart ? best : (Math.random() - 0.5), step: smart && hazard, dash: smart && p.stamina > 0.5 };
 }
 for (const smart of [true, false]) {
-  let clears = 0, tsum = 0, falls = 0; const R = 40;
+  let clears = 0, tsum = 0, falls = 0, maxActive = 0; const R = 40;
+  const t0 = Date.now();
   for (let s = 1; s <= R; s++) {
     const g = new Game(s * 7919); g.start();
-    while (!g.finished && g.time < 60) g.update(bot(g, smart));
+    while (!g.finished && g.time < 60) {
+      g.update(bot(g, smart));
+      maxActive = Math.max(maxActive, g.npcs.filter((n) => n.active).length);
+    }
     if (g.cleared) clears++; tsum += g.time; falls += g.player.falls;
   }
-  console.log(smart ? 'smart' : 'random', 'clear', clears + '/' + R, 'avgT', (tsum / R).toFixed(2), 'avgFalls', (falls / R).toFixed(2), 'course', COURSE);
+  console.log(smart ? 'smart' : 'random', 'clear', clears + '/' + R, 'avgT', (tsum / R).toFixed(2), 'avgFalls', (falls / R).toFixed(2), 'maxActive', maxActive, 'ms', Date.now() - t0, 'course', COURSE);
 }
 { const g = new Game(1); console.log('npcs at start', g.npcs.filter(n => n.active).length, 'rank', g.rank()); }

@@ -1,30 +1,30 @@
 /**
- * Three.js による描画。3 段階 LOD：
- *  - 近景：走路内の子ども（パーツ分けした低ポリ人形を InstancedMesh で描画、走り・転倒モーション）
- *  - 中景：柵の外を並走する簡易人型（InstancedMesh、低頻度更新）
+ * Three.js による描画。グラウンド全体を 1 つの群衆として、3 段階 LOD で描く：
+ *  - 近景：判定ウィンドウ内の子（パーツ分けした低ポリ人形を InstancedMesh で描画、走り・転倒モーション）
+ *  - 中景：ウィンドウ外の数千人（簡易人型。位置・走りアニメはすべて GPU で計算）
  *  - 遠景：地平線まで続く点群（GPU だけで動かす）
+ * 中景・遠景は game.ts と同じ密度分布（先頭〜最後尾）から配置するので、近景と切れ目なくつながる。
  * ゲームの当たり判定は game.ts 側のみ。ここは見た目専用。
  */
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { COURSE, Game, HALF_W, NState, PState, type GameEvent } from './game';
+import { AHEAD, BEHIND, COURSE, Game, NEAR_HW, NState, PState, densityShape, type GameEvent } from './game';
 
 export type Quality = 'low' | 'auto' | 'high';
 
-const SKY = 0xbfe3ff;
+const SKY = 0xc4e4ff;
 const HAT_COLORS = [new THREE.Color(0xe63b3b), new THREE.Color(0xf7f7f2), new THREE.Color(0xffc21a)];
 const SHIRT = new THREE.Color(0xfbfbf6);
+const SKIN = 0xf2c49b;
+const SHORTS = 0x1f2f6b;
 
-// 子ども人形のパーツ定義（ローカル座標、足元が原点）
-interface Part {
-  geo: THREE.BufferGeometry;
-  color: number;
-  instanceColor: boolean;
-}
+const MID_MAX = 6000; // 中景の最大人数
+const MID_W_MAX = 260; // 中景を敷き詰める横幅（m）
+const FAR_MAX = 120000;
 
-function box(w: number, h: number, d: number, oy: number) {
+function box(w: number, h: number, d: number, ox: number, oy: number) {
   const g = new THREE.BoxGeometry(w, h, d);
-  g.translate(0, oy, 0);
+  g.translate(ox, oy, 0);
   return g;
 }
 
@@ -37,26 +37,33 @@ const P_LEG_R = 5;
 const P_ARM_L = 6;
 const P_ARM_R = 7;
 
-function makeParts(): Part[] {
-  const head = new THREE.IcosahedronGeometry(0.155, 1);
-  const hat = new THREE.SphereGeometry(0.17, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2);
-  const brim = new THREE.CylinderGeometry(0.13, 0.13, 0.02, 10);
+interface Part {
+  geo: THREE.BufferGeometry;
+  color: number;
+  instanceColor: boolean;
+}
+
+function hatGeometry(detail: number) {
+  const hat = new THREE.SphereGeometry(0.17, detail, Math.max(3, detail / 2), 0, Math.PI * 2, 0, Math.PI / 2);
+  const brim = new THREE.CylinderGeometry(0.13, 0.13, 0.02, detail);
   brim.scale(1, 1, 1.2);
-  brim.translate(0, 0.0, 0.1);
-  const hatGeo = mergeGeometries([hat.toNonIndexed(), brim.toNonIndexed()])!;
+  brim.translate(0, 0, 0.1);
+  return mergeGeometries([hat.toNonIndexed(), brim.toNonIndexed()])!;
+}
+
+function makeParts(): Part[] {
   return [
-    { geo: box(0.32, 0.36, 0.2, 0), color: 0xffffff, instanceColor: true }, // 胴体（pivot は腰）
-    { geo: box(0.33, 0.16, 0.21, 0), color: 0x1f2f6b, instanceColor: false }, // 短パン
-    { geo: head, color: 0xf4c9a0, instanceColor: false },
-    { geo: hatGeo, color: 0xffffff, instanceColor: true },
-    { geo: box(0.11, 0.56, 0.12, -0.28), color: 0xf2c49b, instanceColor: false },
-    { geo: box(0.11, 0.56, 0.12, -0.28), color: 0xf2c49b, instanceColor: false },
-    { geo: box(0.08, 0.38, 0.08, -0.17), color: 0xf2c49b, instanceColor: false },
-    { geo: box(0.08, 0.38, 0.08, -0.17), color: 0xf2c49b, instanceColor: false },
+    { geo: box(0.32, 0.36, 0.2, 0, 0), color: 0xffffff, instanceColor: true },
+    { geo: box(0.33, 0.16, 0.21, 0, 0), color: SHORTS, instanceColor: false },
+    { geo: new THREE.IcosahedronGeometry(0.155, 1), color: 0xf4c9a0, instanceColor: false },
+    { geo: hatGeometry(10), color: 0xffffff, instanceColor: true },
+    { geo: box(0.11, 0.56, 0.12, 0, -0.28), color: SKIN, instanceColor: false },
+    { geo: box(0.11, 0.56, 0.12, 0, -0.28), color: SKIN, instanceColor: false },
+    { geo: box(0.08, 0.38, 0.08, 0, -0.17), color: SKIN, instanceColor: false },
+    { geo: box(0.08, 0.38, 0.08, 0, -0.17), color: SKIN, instanceColor: false },
   ];
 }
 
-/** 描画用の姿勢 */
 interface Pose {
   x: number;
   y: number;
@@ -64,8 +71,8 @@ interface Pose {
   yaw: number;
   fall: number; // 0=直立, 1=うつ伏せ
   roll: number;
-  swing: number; // 足の振り
-  armUp: number; // 腕を上げる（よろけ）
+  swing: number;
+  armUp: number;
   lean: number;
   bob: number;
 }
@@ -78,10 +85,10 @@ const _q = new THREE.Quaternion();
 const _e = new THREE.Euler();
 const _v = new THREE.Vector3();
 const _s = new THREE.Vector3(1, 1, 1);
+const _c = new THREE.Color();
 
-/** パーツ単位の行列を計算する（InstancedMesh と単体メッシュの両方で使う） */
+/** パーツ単位の行列（ゲーム座標 x(右+) → three 座標 -x。カメラが +z を向くため） */
 function partMatrices(pose: Pose, out: THREE.Matrix4[]) {
-  // ゲーム座標 x(右+) → three 座標 -x（カメラが +z を向くため）
   _e.set(pose.lean + pose.fall * (Math.PI / 2 - 0.12), pose.yaw, pose.roll, 'YXZ');
   _q.setFromEuler(_e);
   _v.set(-pose.x, pose.y + pose.bob + pose.fall * 0.12, pose.z);
@@ -126,7 +133,46 @@ function makeLabelTexture(text: string, color: string, size = 128, font = 'bold 
   return t;
 }
 
+/** 群衆の密度分布どおりに u（0=先頭,1=最後尾）をサンプリング */
+function sampleU(rnd: () => number): number {
+  for (;;) {
+    const u = rnd();
+    if (rnd() < densityShape(u)) return u;
+  }
+}
+
+function seeded(seed: number) {
+  let s = seed;
+  return () => ((s = (s * 16807) % 2147483647) / 2147483647);
+}
+
 const FX_WORDS = ['どたっ', 'ぽてっ', 'ずてーん', 'ころん', 'べちゃ'];
+
+const CROWD_UNIFORMS = () => ({
+  uTime: { value: 0 },
+  uRun: { value: 0 },
+  uFront: { value: 0 },
+  uBack: { value: 0 },
+  uPx: { value: 0 },
+  uPz: { value: 0 },
+  uW: { value: MID_W_MAX },
+  uNearHW: { value: NEAR_HW },
+  uAhead: { value: AHEAD },
+  uBehind: { value: BEHIND },
+  uFog: { value: new THREE.Color(SKY) },
+  uScale: { value: 300 },
+});
+
+// 群衆の位置計算（中景・遠景で共通）
+const CROWD_GLSL = /* glsl */ `
+  uniform float uTime, uRun, uFront, uBack, uPx, uPz, uW, uNearHW, uAhead, uBehind;
+  float crowdZ(float u, float ph) {
+    return uBack + (1.0 - u) * (uFront - uBack) + sin(uTime * 0.6 + ph * 6.28) * 0.35 * uRun;
+  }
+  bool inNear(float x, float z) {
+    return abs(x - uPx) < uNearHW + 0.6 && z > uPz - uBehind - 1.5 && z < uPz + uAhead + 2.0;
+  }
+`;
 
 export class Renderer {
   readonly renderer: THREE.WebGLRenderer;
@@ -138,19 +184,21 @@ export class Renderer {
   private playerParts: THREE.Mesh[] = [];
   private playerMats: THREE.Matrix4[] = [];
   private playerShadow: THREE.Mesh;
+  private playerRing: THREE.Mesh;
   private playerMarker: THREE.Mesh;
   private tmpMats: THREE.Matrix4[] = [];
-  private mid!: THREE.InstancedMesh;
-  private midHat!: THREE.InstancedMesh;
-  private midData: { x: number; z: number; v: number; ph: number }[] = [];
-  private midFrame = 0;
+  private mid!: THREE.Mesh;
+  private midGeo!: THREE.InstancedBufferGeometry;
+  private midMat!: THREE.ShaderMaterial;
   private far!: THREE.Points;
   private farMat!: THREE.ShaderMaterial;
+  private tiled: { obj: THREE.Object3D; step: number }[] = [];
+  private goalBanner!: THREE.Group;
   private warnSprites: THREE.Sprite[] = [];
   private fxSprites: { s: THREE.Sprite; t: number; vy: number }[] = [];
   private fxTex: THREE.Texture[] = [];
   private dust: { s: THREE.Sprite; t: number; vx: number; vz: number }[] = [];
-  private camPos = new THREE.Vector3(0, 5, -7);
+  private camPos = new THREE.Vector3(0, 6, -7);
   private camLook = new THREE.Vector3(0, 1, 8);
   private shake = 0;
   private clock = 0;
@@ -158,8 +206,6 @@ export class Renderer {
   private pixelRatio = 1;
   private fpsAcc = 0;
   private fpsFrames = 0;
-  private midCountMax = 1200;
-  private farCountMax = 60000;
   private level = 2; // 自動調整レベル 0..3
   private width = 1;
   private height = 1;
@@ -168,21 +214,20 @@ export class Renderer {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.scene.background = new THREE.Color(SKY);
-    this.scene.fog = new THREE.Fog(SKY, 40, 420);
-    this.camera = new THREE.PerspectiveCamera(62, 1, 0.1, 900);
+    this.scene.fog = new THREE.Fog(SKY, 50, 520);
+    this.camera = new THREE.PerspectiveCamera(62, 1, 0.1, 1600);
 
-    this.scene.add(new THREE.HemisphereLight(0xeaf6ff, 0x6d8f4a, 1.6));
+    this.scene.add(new THREE.HemisphereLight(0xeaf6ff, 0x9a7a55, 1.6));
     const sun = new THREE.DirectionalLight(0xffffff, 1.6);
     sun.position.set(-30, 60, -20);
     this.scene.add(sun);
 
-    this.buildStadium();
+    this.buildField();
 
     // 近景の子ども（パーツごとに InstancedMesh）
     const parts = makeParts();
     for (const p of parts) {
-      const mat = new THREE.MeshLambertMaterial({ color: p.color });
-      const m = new THREE.InstancedMesh(p.geo, mat, Game.POOL);
+      const m = new THREE.InstancedMesh(p.geo, new THREE.MeshLambertMaterial({ color: p.color }), Game.POOL);
       m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       m.frustumCulled = false;
       if (p.instanceColor) m.setColorAt(0, SHIRT);
@@ -194,28 +239,26 @@ export class Renderer {
       this.tmpMats.push(new THREE.Matrix4());
       this.playerMats.push(new THREE.Matrix4());
     }
-    // 丸影
     const shadowGeo = new THREE.CircleGeometry(0.3, 12);
     shadowGeo.rotateX(-Math.PI / 2);
-    const shadowMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.22, depthWrite: false });
+    const shadowMat = new THREE.MeshBasicMaterial({ color: 0x5a3a1a, transparent: true, opacity: 0.3, depthWrite: false });
     this.nearShadow = new THREE.InstancedMesh(shadowGeo, shadowMat, Game.POOL);
     this.nearShadow.frustumCulled = false;
     this.nearShadow.renderOrder = 1;
     this.scene.add(this.nearShadow);
-    // 転倒者の危険ゾーン
     const ringGeo = new THREE.RingGeometry(0.42, 0.62, 20);
     ringGeo.rotateX(-Math.PI / 2);
     this.hazard = new THREE.InstancedMesh(
       ringGeo,
-      new THREE.MeshBasicMaterial({ color: 0xff3b30, transparent: true, opacity: 0.55, depthWrite: false }),
+      new THREE.MeshBasicMaterial({ color: 0xff3b30, transparent: true, opacity: 0.6, depthWrite: false }),
       Game.POOL,
     );
     this.hazard.frustumCulled = false;
     this.hazard.renderOrder = 2;
     this.scene.add(this.hazard);
 
-    // プレイヤー
-    const pColors = [0xff7a1a, 0x1f2f6b, 0xf4c9a0, 0x2fa8ff, 0xf2c49b, 0xf2c49b, 0xf2c49b, 0xf2c49b];
+    // プレイヤー（オレンジのシャツ＋青い帽子）
+    const pColors = [0xff7a1a, SHORTS, 0xf4c9a0, 0x2fa8ff, SKIN, SKIN, SKIN, SKIN];
     parts.forEach((p, i) => {
       const mesh = new THREE.Mesh(p.geo, new THREE.MeshLambertMaterial({ color: pColors[i] }));
       mesh.matrixAutoUpdate = false;
@@ -224,14 +267,19 @@ export class Renderer {
     });
     this.playerShadow = new THREE.Mesh(shadowGeo, shadowMat);
     this.scene.add(this.playerShadow);
-    const markerGeo = new THREE.ConeGeometry(0.16, 0.3, 4);
+    const pr = new THREE.RingGeometry(0.45, 0.6, 28);
+    pr.rotateX(-Math.PI / 2);
+    this.playerRing = new THREE.Mesh(pr, new THREE.MeshBasicMaterial({ color: 0x2fa8ff, transparent: true, opacity: 0.85, depthWrite: false }));
+    this.playerRing.renderOrder = 3;
+    this.scene.add(this.playerRing);
+    const markerGeo = new THREE.ConeGeometry(0.22, 0.4, 4);
     markerGeo.rotateX(Math.PI);
     this.playerMarker = new THREE.Mesh(markerGeo, new THREE.MeshBasicMaterial({ color: 0x2fa8ff }));
     this.scene.add(this.playerMarker);
 
-    // 前兆「！」
+    // 前兆「！」・擬音・土ぼこり
     const warnTex = makeLabelTexture('!', '#ffd400', 64, 'bold 60px sans-serif');
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 60; i++) {
       const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: warnTex, depthTest: false, transparent: true }));
       s.scale.set(0.9, 0.45, 1);
       s.visible = false;
@@ -240,7 +288,7 @@ export class Renderer {
       this.scene.add(s);
     }
     this.fxTex = FX_WORDS.map((w) => makeLabelTexture(w, '#ffffff', 128, 'bold 64px sans-serif', '#ff5a36'));
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 12; i++) {
       const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.fxTex[0], depthTest: false, transparent: true }));
       s.visible = false;
       s.renderOrder = 11;
@@ -258,7 +306,7 @@ export class Renderer {
       g.fillRect(0, 0, 64, 64);
       return new THREE.CanvasTexture(c);
     })();
-    for (let i = 0; i < 48; i++) {
+    for (let i = 0; i < 60; i++) {
       const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: dustTex, transparent: true, depthWrite: false }));
       s.visible = false;
       this.dust.push({ s, t: 0, vx: 0, vz: 0 });
@@ -269,186 +317,239 @@ export class Renderer {
     this.buildFarCrowd();
   }
 
-  private buildStadium() {
-    const ground = new THREE.Mesh(new THREE.PlaneGeometry(3000, 3000, 60, 60), new THREE.MeshLambertMaterial({ color: 0x7fbf55 }));
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.set(0, -0.05, 400);
-    this.scene.add(ground);
-
-    // 走路（土のトラック）
-    const trackLen = COURSE + 40;
-    const track = new THREE.Mesh(
-      new THREE.PlaneGeometry(HALF_W * 2 + 0.6, trackLen, 1, 70),
-      new THREE.MeshLambertMaterial({ color: 0xc9774a }),
-    );
-    track.rotation.x = -Math.PI / 2;
-    track.position.set(0, 0, trackLen / 2 - 15);
-    this.scene.add(track);
-    const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-    const laneCount = 6;
-    for (let i = 0; i <= laneCount; i++) {
-      const x = -HALF_W + (i * HALF_W * 2) / laneCount;
-      const l = new THREE.Mesh(new THREE.PlaneGeometry(0.06, trackLen), lineMat);
-      l.rotation.x = -Math.PI / 2;
-      l.position.set(x, 0.005, trackLen / 2 - 15);
-      this.scene.add(l);
+  /** 地平線まで続く巨大グラウンド */
+  private buildField() {
+    // 土のテクスチャ（細かい粒＋うっすらしたレーン線で横移動の速さが分かるように）
+    const c = document.createElement('canvas');
+    c.width = c.height = 256;
+    const g = c.getContext('2d')!;
+    g.fillStyle = '#d9ae7e';
+    g.fillRect(0, 0, 256, 256);
+    const rnd = seeded(4242);
+    for (let i = 0; i < 1800; i++) {
+      const l = 0.75 + rnd() * 0.4;
+      g.fillStyle = `rgba(${Math.round(150 * l)},${Math.round(100 * l)},${Math.round(60 * l)},0.35)`;
+      g.fillRect(rnd() * 256, rnd() * 256, 1 + rnd() * 3, 1 + rnd() * 3);
     }
+    g.fillStyle = 'rgba(255,255,255,0.28)';
+    g.fillRect(0, 0, 3, 256);
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    const size = 4000;
+    tex.repeat.set(size / 4, size / 4); // 4m ごとにレーン線
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(size, size, 80, 80), new THREE.MeshLambertMaterial({ color: 0xffffff, map: tex }));
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.set(0, -0.02, 600);
+    this.scene.add(ground);
+    this.tiled.push({ obj: ground, step: 4 });
+
+    const W = 4000;
     // スタートライン
-    const start = new THREE.Mesh(new THREE.PlaneGeometry(HALF_W * 2, 0.12), lineMat);
+    const start = new THREE.Mesh(new THREE.PlaneGeometry(W, 0.15), new THREE.MeshBasicMaterial({ color: 0xffffff }));
     start.rotation.x = -Math.PI / 2;
     start.position.set(0, 0.006, -0.3);
     this.scene.add(start);
-    // ゴールライン（市松）
-    const c = document.createElement('canvas');
-    c.width = 256;
-    c.height = 16;
-    const g = c.getContext('2d')!;
-    for (let i = 0; i < 32; i++)
-      for (let j = 0; j < 2; j++) {
-        g.fillStyle = (i + j) % 2 ? '#111' : '#fff';
-        g.fillRect(i * 8, j * 8, 8, 8);
-      }
-    const checker = new THREE.CanvasTexture(c);
-    checker.magFilter = THREE.NearestFilter;
-    const goal = new THREE.Mesh(new THREE.PlaneGeometry(HALF_W * 2, 0.8), new THREE.MeshBasicMaterial({ map: checker }));
-    goal.rotation.x = -Math.PI / 2;
-    goal.position.set(0, 0.007, COURSE);
-    this.scene.add(goal);
-    // ゴールアーチ
-    const poleMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-    for (const s of [-1, 1]) {
-      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 4.2, 8), poleMat);
-      pole.position.set(s * (HALF_W + 0.5), 2.1, COURSE);
-      this.scene.add(pole);
-    }
-    const bannerTex = makeLabelTexture('GOAL', '#ffffff', 256, 'bold 150px sans-serif', '#c0392b');
-    const banner = new THREE.Mesh(
-      new THREE.PlaneGeometry(HALF_W * 2 + 1, 1.3),
-      new THREE.MeshBasicMaterial({ map: bannerTex, color: 0xffffff, side: THREE.DoubleSide }),
-    );
-    banner.position.set(0, 3.7, COURSE);
-    banner.rotation.y = Math.PI;
-    const bannerBack = new THREE.Mesh(new THREE.PlaneGeometry(HALF_W * 2 + 1.1, 1.4), new THREE.MeshBasicMaterial({ color: 0xd8342a }));
-    bannerBack.position.set(0, 3.7, COURSE + 0.02);
-    bannerBack.rotation.y = Math.PI;
-    this.scene.add(bannerBack, banner);
-    // ゴールテープ
-    const tape = new THREE.Mesh(new THREE.BoxGeometry(HALF_W * 2 + 1, 0.05, 0.02), new THREE.MeshBasicMaterial({ color: 0xff4d6d }));
-    tape.position.set(0, 1.0, COURSE);
-    this.scene.add(tape);
-
-    // 柵
-    const railMat = new THREE.MeshLambertMaterial({ color: 0xf2f2f2 });
-    for (const s of [-1, 1]) {
-      const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, trackLen), railMat);
-      rail.position.set(s * (HALF_W + 0.45), 0.7, trackLen / 2 - 15);
-      this.scene.add(rail);
-      const posts = new THREE.InstancedMesh(new THREE.BoxGeometry(0.08, 0.7, 0.08), railMat, Math.ceil(trackLen / 2.5));
-      for (let i = 0; i < posts.count; i++) {
-        _m.makeTranslation(s * (HALF_W + 0.45), 0.35, -15 + i * 2.5);
-        posts.setMatrixAt(i, _m);
-      }
-      this.scene.add(posts);
-    }
-    // 距離表示
+    // 10m ごとのライン
     for (let d = 10; d < COURSE; d += 10) {
-      const tex = makeLabelTexture(`${d}m`, '#ffffff', 128, 'bold 80px sans-serif', '#7a3a1a');
-      const sign = new THREE.Mesh(new THREE.PlaneGeometry(2.0, 1.0), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
-      sign.rotation.x = -Math.PI / 2;
-      sign.rotation.z = Math.PI;
-      sign.position.set(0, 0.01, d);
-      this.scene.add(sign);
-      const line = new THREE.Mesh(new THREE.PlaneGeometry(HALF_W * 2, 0.05), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 }));
+      const line = new THREE.Mesh(
+        new THREE.PlaneGeometry(W, 0.08),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 }),
+      );
       line.rotation.x = -Math.PI / 2;
       line.position.set(0, 0.006, d);
       this.scene.add(line);
+      // 距離表示（プレイヤーの横位置に合わせて敷き詰める）
+      const ltex = makeLabelTexture(`${d}m`, '#ffffff', 128, 'bold 80px sans-serif', '#8a4a20');
+      const signGeo = new THREE.PlaneGeometry(2.4, 1.2);
+      signGeo.rotateX(-Math.PI / 2);
+      signGeo.rotateY(Math.PI);
+      const signs = new THREE.InstancedMesh(signGeo, new THREE.MeshBasicMaterial({ map: ltex, transparent: true, depthWrite: false }), 13);
+      for (let i = 0; i < 13; i++) {
+        _m.makeTranslation((i - 6) * 14, 0.012, d + 0.9);
+        signs.setMatrixAt(i, _m);
+      }
+      signs.frustumCulled = false;
+      this.scene.add(signs);
+      this.tiled.push({ obj: signs, step: 14 });
     }
+    // ゴールライン（市松模様）
+    const gc = document.createElement('canvas');
+    gc.width = 16;
+    gc.height = 16;
+    const gg = gc.getContext('2d')!;
+    for (let i = 0; i < 2; i++)
+      for (let j = 0; j < 2; j++) {
+        gg.fillStyle = (i + j) % 2 ? '#111' : '#fff';
+        gg.fillRect(i * 8, j * 8, 8, 8);
+      }
+    const checker = new THREE.CanvasTexture(gc);
+    checker.magFilter = THREE.NearestFilter;
+    checker.wrapS = checker.wrapT = THREE.RepeatWrapping;
+    checker.repeat.set(W / 0.8, 1);
+    const goal = new THREE.Mesh(new THREE.PlaneGeometry(W, 0.8), new THREE.MeshBasicMaterial({ map: checker }));
+    goal.rotation.x = -Math.PI / 2;
+    goal.position.set(0, 0.008, COURSE);
+    this.scene.add(goal);
+    // ゴールテープとポール（地平線まで）
+    const tape = new THREE.Mesh(new THREE.BoxGeometry(W, 0.05, 0.03), new THREE.MeshBasicMaterial({ color: 0xff4d6d }));
+    tape.position.set(0, 1.1, COURSE);
+    this.scene.add(tape);
+    const poleCount = 61;
+    const poles = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.1, 0.1, 3.2, 6), new THREE.MeshLambertMaterial({ color: 0xffffff }), poleCount);
+    const flags = new THREE.InstancedMesh(new THREE.PlaneGeometry(1.4, 0.8), new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }), poleCount);
+    for (let i = 0; i < poleCount; i++) {
+      const x = (i - (poleCount - 1) / 2) * 12;
+      _m.makeTranslation(x, 1.6, COURSE);
+      poles.setMatrixAt(i, _m);
+      _m.makeTranslation(x + 0.7, 2.8, COURSE);
+      flags.setMatrixAt(i, _m);
+      flags.setColorAt(i, i % 2 ? HAT_COLORS[0] : HAT_COLORS[2]);
+    }
+    poles.frustumCulled = flags.frustumCulled = false;
+    this.scene.add(poles, flags);
+    this.tiled.push({ obj: poles, step: 12 }, { obj: flags, step: 12 });
+    // 大きな GOAL 看板（プレイヤーの正面に浮かぶ）
+    this.goalBanner = new THREE.Group();
+    const bannerTex = makeLabelTexture('GOAL', '#ffffff', 256, 'bold 150px sans-serif', '#c0392b');
+    const banner = new THREE.Mesh(new THREE.PlaneGeometry(14, 3.5), new THREE.MeshBasicMaterial({ map: bannerTex, transparent: true }));
+    banner.rotation.y = Math.PI;
+    const back = new THREE.Mesh(new THREE.PlaneGeometry(14.4, 3.8), new THREE.MeshBasicMaterial({ color: 0xd8342a }));
+    back.rotation.y = Math.PI;
+    back.position.z = 0.03;
+    this.goalBanner.add(back, banner);
+    this.goalBanner.position.set(0, 7, COURSE);
+    this.scene.add(this.goalBanner);
   }
 
-  /** 中景：柵の外を並走する簡易人型 */
+  /** 中景：ウィンドウ外の数千人（GPU で位置と走りを計算） */
   private buildMidCrowd() {
-    const body = box(0.34, 0.9, 0.22, 0.5);
-    const head = new THREE.IcosahedronGeometry(0.16, 0);
-    head.translate(0, 1.1, 0);
-    const setColor = (geo: THREE.BufferGeometry, c: THREE.Color) => {
-      const n = geo.getAttribute('position').count;
-      const arr = new Float32Array(n * 3);
-      for (let i = 0; i < n; i++) c.toArray(arr, i * 3);
-      geo.setAttribute('color', new THREE.BufferAttribute(arr, 3));
-      return geo;
+    const setColor = (geo: THREE.BufferGeometry, c: number, hat = 0) => {
+      const g = geo.index ? geo.toNonIndexed() : geo;
+      const n = g.getAttribute('position').count;
+      const col = new Float32Array(n * 3);
+      const isHat = new Float32Array(n).fill(hat);
+      const cc = new THREE.Color(c);
+      for (let i = 0; i < n; i++) cc.toArray(col, i * 3);
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      g.setAttribute('isHat', new THREE.BufferAttribute(isHat, 1));
+      g.deleteAttribute('uv');
+      return g;
     };
-    const geo = mergeGeometries([
-      setColor(body.toNonIndexed(), new THREE.Color(0xf4f4ef)),
-      setColor(head.toNonIndexed(), new THREE.Color(0xf4c9a0)),
+    const head = new THREE.IcosahedronGeometry(0.155, 0);
+    head.translate(0, 1.22, 0);
+    const hat = hatGeometry(6);
+    hat.translate(0, 1.26, 0);
+    const base = mergeGeometries([
+      setColor(box(0.32, 0.38, 0.2, 0, 0.89), 0xf6f6f0),
+      setColor(box(0.33, 0.16, 0.21, 0, 0.64), SHORTS),
+      setColor(box(0.11, 0.56, 0.12, 0.085, 0.3), SKIN),
+      setColor(box(0.11, 0.56, 0.12, -0.085, 0.3), SKIN),
+      setColor(box(0.08, 0.36, 0.08, 0.2, 0.86), SKIN),
+      setColor(box(0.08, 0.36, 0.08, -0.2, 0.86), SKIN),
+      setColor(head, 0xf4c9a0),
+      setColor(hat, 0xffffff, 1),
     ])!;
-    const hat = new THREE.SphereGeometry(0.17, 6, 4, 0, Math.PI * 2, 0, Math.PI / 2);
-    hat.translate(0, 1.14, 0);
-    const max = 1600;
-    this.mid = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }), max);
-    this.midHat = new THREE.InstancedMesh(hat, new THREE.MeshLambertMaterial({ color: 0xffffff }), max);
-    this.mid.frustumCulled = this.midHat.frustumCulled = false;
-    this.mid.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.midHat.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    let seed = 12345;
-    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
-    for (let i = 0; i < max; i++) {
-      const side = i % 2 ? 1 : -1;
-      const x = side * (HALF_W + 1.4 + Math.pow(rnd(), 1.6) * 55);
-      this.midData.push({ x, z: rnd() * 150 - 15, v: 2.3 + rnd() * 0.8, ph: rnd() * 6.28 });
-      this.midHat.setColorAt(i, HAT_COLORS[rnd() < 0.5 ? 0 : 1]);
+    const geo = new THREE.InstancedBufferGeometry();
+    for (const k of ['position', 'normal', 'color', 'isHat']) geo.setAttribute(k, base.getAttribute(k));
+    const aX = new Float32Array(MID_MAX);
+    const aU = new Float32Array(MID_MAX);
+    const aPh = new Float32Array(MID_MAX);
+    const aHat = new Float32Array(MID_MAX);
+    const rnd = seeded(13579);
+    for (let i = 0; i < MID_MAX; i++) {
+      aX[i] = rnd();
+      aU[i] = sampleU(rnd);
+      aPh[i] = rnd();
+      aHat[i] = rnd() < 0.5 ? 0 : 1;
     }
-    this.scene.add(this.mid, this.midHat);
-  }
-
-  /** 遠景：地平線まで続く点群（GPU で移動） */
-  private buildFarCrowd() {
-    const count = 90000;
-    const pos = new Float32Array(count * 3);
-    const col = new Float32Array(count * 3);
-    const spd = new Float32Array(count);
-    let seed = 987654;
-    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
-    for (let i = 0; i < count; i++) {
-      const side = rnd() < 0.5 ? -1 : 1;
-      const x = side * (HALF_W + 25 + Math.pow(rnd(), 1.3) * 900);
-      pos[i * 3] = x;
-      pos[i * 3 + 1] = 0;
-      pos[i * 3 + 2] = rnd() * 760;
-      const c = rnd() < 0.5 ? HAT_COLORS[0] : rnd() < 0.85 ? HAT_COLORS[1] : new THREE.Color(0xf4c9a0);
-      c.toArray(col, i * 3);
-      spd[i] = 2.2 + rnd() * 0.9;
-    }
-    // 中心から近い順に並べ替えず、ランダム順なので drawRange を減らすと均等に間引ける
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    geo.setAttribute('speed', new THREE.BufferAttribute(spd, 1));
-    this.farMat = new THREE.ShaderMaterial({
-      uniforms: {
-        uTime: { value: 0 },
-        uCamZ: { value: 0 },
-        uScale: { value: 300 },
-        uFog: { value: new THREE.Color(SKY) },
-      },
+    geo.setAttribute('aX', new THREE.InstancedBufferAttribute(aX, 1));
+    geo.setAttribute('aU', new THREE.InstancedBufferAttribute(aU, 1));
+    geo.setAttribute('aPh', new THREE.InstancedBufferAttribute(aPh, 1));
+    geo.setAttribute('aHat', new THREE.InstancedBufferAttribute(aHat, 1));
+    geo.instanceCount = MID_MAX;
+    this.midGeo = geo;
+    this.midMat = new THREE.ShaderMaterial({
+      uniforms: CROWD_UNIFORMS(),
       vertexShader: /* glsl */ `
+        ${CROWD_GLSL}
         attribute vec3 color;
-        attribute float speed;
-        uniform float uTime;
-        uniform float uCamZ;
-        uniform float uScale;
+        attribute float isHat;
+        attribute float aX, aU, aPh, aHat;
         varying vec3 vColor;
         varying float vFog;
         void main() {
+          float x0 = uPx - uW * 0.5;
+          float x = x0 + mod(aX * uW - x0, uW);
+          float z = crowdZ(aU, aPh);
+          if (inNear(x, z)) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
           vec3 p = position;
-          float z0 = uCamZ - 40.0;
-          p.z = z0 + mod(p.z + uTime * speed - z0, 760.0);
-          p.y = 0.75 + abs(sin(uTime * 9.0 + position.x * 1.7 + position.z)) * 0.12;
-          vec4 mv = modelViewMatrix * vec4(p, 1.0);
+          float ph = uTime * 9.0 + aPh * 6.28;
+          float run = uRun;
+          // 足と腕を振る（頂点の高さ・左右で判定）
+          float leg = step(p.y, 0.58) * sign(p.x) * (0.58 - p.y) * 0.9;
+          float arm = step(0.68, p.y) * step(p.y, 1.04) * step(0.15, abs(p.x)) * sign(p.x) * (1.04 - p.y) * 0.8;
+          p.z += sin(ph) * (leg - arm) * run;
+          p.y += abs(sin(ph)) * 0.06 * run;
+          p.z += p.y * 0.12 * run; // 前傾
+          vec4 mv = modelViewMatrix * vec4(p + vec3(x, 0.0, z), 1.0);
+          gl_Position = projectionMatrix * mv;
+          vec3 hatCol = aHat > 0.5 ? vec3(0.95, 0.95, 0.93) : vec3(0.85, 0.16, 0.16);
+          vec3 c = mix(color, hatCol, isHat);
+          float light = 0.62 + 0.45 * max(dot(normalize(normal), normalize(vec3(0.4, 1.0, -0.3))), 0.0);
+          vColor = c * light;
+          vFog = smoothstep(50.0, 520.0, -mv.z);
+        }`,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uFog;
+        varying vec3 vColor;
+        varying float vFog;
+        void main() {
+          gl_FragColor = vec4(mix(vColor, uFog, vFog), 1.0);
+          #include <colorspace_fragment>
+        }`,
+    });
+    this.mid = new THREE.Mesh(geo, this.midMat);
+    this.mid.frustumCulled = false;
+    this.scene.add(this.mid);
+  }
+
+  /** 遠景：中景より外側、地平線まで続く点群 */
+  private buildFarCrowd() {
+    const count = FAR_MAX;
+    const pos = new Float32Array(count * 3);
+    const col = new Float32Array(count * 3);
+    const rnd = seeded(987654);
+    for (let i = 0; i < count; i++) {
+      pos[i * 3] = (rnd() < 0.5 ? -1 : 1) * Math.max(0.0005, Math.pow(rnd(), 1.4)); // 横方向（中景の外側からの距離）
+      pos[i * 3 + 1] = sampleU(rnd);
+      pos[i * 3 + 2] = rnd();
+      const c = rnd() < 0.5 ? HAT_COLORS[0] : HAT_COLORS[1];
+      c.toArray(col, i * 3);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    this.farMat = new THREE.ShaderMaterial({
+      uniforms: CROWD_UNIFORMS(),
+      vertexShader: /* glsl */ `
+        ${CROWD_GLSL}
+        uniform float uScale;
+        attribute vec3 color;
+        varying vec3 vColor;
+        varying float vFog;
+        void main() {
+          float side = sign(position.x);
+          float x = uPx + side * (uW * 0.5 + abs(position.x) * 1400.0);
+          float z = crowdZ(position.y, position.z);
+          float y = 1.2 + abs(sin(uTime * 9.0 + position.z * 40.0)) * 0.1 * uRun;
+          vec4 mv = modelViewMatrix * vec4(x, y, z, 1.0);
           gl_Position = projectionMatrix * mv;
           float d = -mv.z;
-          gl_PointSize = clamp(uScale * 0.55 / d, 1.0, 9.0);
+          gl_PointSize = clamp(uScale * 0.5 / d, 1.0, 6.0);
           vColor = color;
-          vFog = smoothstep(60.0, 520.0, d);
+          vFog = smoothstep(80.0, 900.0, d);
         }`,
       fragmentShader: /* glsl */ `
         uniform vec3 uFog;
@@ -457,7 +558,7 @@ export class Renderer {
         void main() {
           vec2 c = gl_PointCoord - 0.5;
           if (dot(c, c) > 0.25) discard;
-          gl_FragColor = vec4(mix(vColor, uFog, vFog * 0.85), 1.0);
+          gl_FragColor = vec4(mix(vColor, uFog, vFog * 0.8), 1.0);
           #include <colorspace_fragment>
         }`,
     });
@@ -476,12 +577,15 @@ export class Renderer {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const lv = this.level;
     this.pixelRatio = [Math.min(dpr, 0.75), Math.min(dpr, 1), Math.min(dpr, 1.5), dpr][lv];
-    this.midCountMax = [300, 600, 1000, 1600][lv];
-    this.farCountMax = [15000, 30000, 60000, 90000][lv];
+    // 中景の横幅を絞ると人数も比例して減る（密度は一定）
+    const midW = [90, 130, 190, MID_W_MAX][lv];
+    this.midGeo.instanceCount = Math.round((MID_MAX * midW) / MID_W_MAX);
+    this.midMat.uniforms.uW.value = midW;
+    this.farMat.uniforms.uW.value = midW;
+    this.far.geometry.setDrawRange(0, [25000, 50000, 90000, FAR_MAX][lv]);
     this.renderer.setPixelRatio(this.pixelRatio);
     this.renderer.setSize(this.width, this.height, false);
-    this.far.geometry.setDrawRange(0, this.farCountMax);
-    this.mid.count = this.midHat.count = this.midCountMax;
+    this.farMat.uniforms.uScale.value = this.height * this.pixelRatio * 0.9;
   }
 
   resize(w: number, h: number) {
@@ -490,15 +594,14 @@ export class Renderer {
     this.renderer.setPixelRatio(this.pixelRatio);
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
-    // 縦持ちでは視野角を広げて前方を見やすくする
-    this.camera.fov = w < h ? 72 : 58;
+    this.camera.fov = w < h ? 74 : 60;
     this.camera.updateProjectionMatrix();
     this.farMat.uniforms.uScale.value = h * this.pixelRatio * 0.9;
   }
 
   /** 自動画質：fps が低ければ段階的に落とす */
   private autoTune(dt: number) {
-    if (this.quality !== 'auto') return;
+    if (this.quality !== 'auto' || dt <= 0) return;
     this.fpsAcc += dt;
     this.fpsFrames++;
     if (this.fpsAcc < 2) return;
@@ -519,7 +622,7 @@ export class Renderer {
     for (const e of events) {
       if (e.type === 'npcFall' || e.type === 'playerFall') {
         const dz = e.z - p.z;
-        if (dz > -4 && dz < 26) this.spawnWord(e.x, e.z, e.type === 'playerFall');
+        if (dz > -4 && dz < 26 && Math.abs(e.x - p.x) < 9) this.spawnWord(e.x, e.z, e.type === 'playerFall');
         this.spawnDust(e.x, e.z + 0.5, e.type === 'playerFall' ? 8 : 4);
         if (e.type === 'playerFall') this.shake = 0.5;
       } else if (e.type === 'bump' || e.type === 'trip') {
@@ -598,11 +701,8 @@ export class Renderer {
       this.poseNpc(n, pose);
       partMatrices(pose, this.tmpMats);
       for (let k = 0; k < this.near.length; k++) this.near[k].setMatrixAt(count, this.tmpMats[k]);
-      const hat = HAT_COLORS[n.hat];
-      this.near[P_HAT].setColorAt(count, hat);
-      _c.copy(SHIRT);
-      if (n.leader) _c.set(0xffd23f);
-      else _c.offsetHSL(0, 0, -n.tint * 0.06);
+      this.near[P_HAT].setColorAt(count, HAT_COLORS[n.hat]);
+      _c.copy(SHIRT).offsetHSL(0, 0, -n.tint * 0.06);
       this.near[P_TORSO].setColorAt(count, _c);
       _m.makeTranslation(-n.x, 0.01, n.z + pose.fall * 0.45);
       this.nearShadow.setMatrixAt(count, _m);
@@ -657,32 +757,26 @@ export class Renderer {
     }
     this.playerShadow.position.set(-p.x, 0.012, p.z);
     this.playerShadow.scale.setScalar(1.2 - p.y);
-    this.playerMarker.position.set(-p.x, 2.0 + p.y + Math.sin(this.clock * 5) * 0.08, p.z);
+    this.playerRing.position.set(-p.x, 0.02, p.z);
+    this.playerRing.scale.setScalar(1 + Math.sin(this.clock * 6) * 0.08);
+    this.playerMarker.position.set(-p.x, 2.1 + p.y + Math.sin(this.clock * 5) * 0.1, p.z);
     this.playerMarker.rotation.y = this.clock * 2;
 
-    // 中景（低頻度更新）
-    this.midFrame++;
-    if (this.midFrame % 2 === 0 || dt > 0.03) {
-      const t = this.clock;
-      const camZ = p.z;
-      for (let i = 0; i < this.midCountMax; i++) {
-        const d = this.midData[i];
-        if (game.started && !game.finished) d.z += d.v * dt * (this.midFrame % 2 === 0 ? 2 : 1);
-        if (d.z < camZ - 12) d.z += 150;
-        else if (d.z > camZ + 140) d.z -= 150;
-        const bob = game.started ? Math.abs(Math.sin(t * 9 + d.ph)) * 0.08 : 0;
-        _m.makeTranslation(d.x, bob, d.z);
-        this.mid.setMatrixAt(i, _m);
-        this.midHat.setMatrixAt(i, _m);
-      }
-      this.mid.instanceMatrix.needsUpdate = true;
-      this.midHat.instanceMatrix.needsUpdate = true;
-      if (this.midHat.instanceColor) this.midHat.instanceColor.needsUpdate = true;
+    // 中景・遠景（GPU）
+    const running = game.started ? 1 : 0;
+    for (const mat of [this.midMat, this.farMat]) {
+      const u = mat.uniforms;
+      u.uTime.value = this.clock;
+      u.uRun.value = running;
+      u.uFront.value = game.front;
+      u.uBack.value = game.back;
+      u.uPx.value = -p.x;
+      u.uPz.value = p.z;
     }
 
-    // 遠景
-    this.farMat.uniforms.uTime.value = game.started ? game.time : 0;
-    this.farMat.uniforms.uCamZ.value = p.z;
+    // プレイヤーの横位置に合わせて敷き詰めるもの
+    for (const t of this.tiled) t.obj.position.x = Math.round(-p.x / t.step) * t.step;
+    this.goalBanner.position.x = -p.x;
 
     // エフェクト
     for (const f of this.fxSprites) {
@@ -704,13 +798,12 @@ export class Renderer {
       if (d.t <= 0) d.s.visible = false;
     }
 
-    // カメラ（追従）
+    // カメラ（追従）。高めの位置から群衆の海を見渡す
     const portrait = this.width < this.height;
-    const tx = -p.x * 0.8;
-    const camH = portrait ? 5.6 : 4.6;
-    const back = portrait ? 6.8 : 6.2;
-    this.camPos.lerp(_v.set(tx, camH, p.z - back), 1 - Math.exp(-dt * 8));
-    this.camLook.lerp(_v.set(-p.x * 0.75, 0.6, p.z + (portrait ? 9 : 10)), 1 - Math.exp(-dt * 10));
+    const camH = portrait ? 7.2 : 5.8;
+    const back = portrait ? 7.6 : 7.2;
+    this.camPos.lerp(_v.set(-p.x, camH, p.z - back), 1 - Math.exp(-dt * 8));
+    this.camLook.lerp(_v.set(-p.x, 0.4, p.z + (portrait ? 10 : 12)), 1 - Math.exp(-dt * 10));
     this.shake = Math.max(0, this.shake - dt);
     const sh = this.shake * 0.25;
     this.camera.position.set(this.camPos.x + (Math.random() - 0.5) * sh, this.camPos.y + (Math.random() - 0.5) * sh, this.camPos.z);
@@ -722,8 +815,9 @@ export class Renderer {
   /** リトライ時にカメラを即座に移動 */
   snapCamera(game: Game) {
     const p = game.player;
-    this.camPos.set(-p.x * 0.55, 5.4, p.z - 6.6);
-    this.camLook.set(-p.x * 0.75, 0.6, p.z + 9);
+    const portrait = this.width < this.height;
+    this.camPos.set(-p.x, portrait ? 7.2 : 5.8, p.z - 7.4);
+    this.camLook.set(-p.x, 0.4, p.z + 11);
     for (const f of this.fxSprites) {
       f.t = 0;
       f.s.visible = false;
@@ -732,8 +826,5 @@ export class Renderer {
       d.t = 0;
       d.s.visible = false;
     }
-    for (let i = 0; i < this.midData.length; i++) this.midData[i].z = ((i * 37) % 150) - 15;
   }
 }
-
-const _c = new THREE.Color();

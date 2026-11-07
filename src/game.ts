@@ -1,33 +1,44 @@
 /**
  * ゲーム進行（描画から独立したシミュレーション）。
  * - 固定タイムステップ (1/60 秒) で更新するので端末性能に関係なく同じ挙動になる。
- * - 581万人すべては計算しない。プレイヤー周辺の数百人だけを個別に動かし、
- *   順位は群衆全体の「先頭」「最後尾」と密度分布から決定論的に求める。
+ * - グラウンド全体が 1 つの巨大な群衆。581万人すべては計算せず、
+ *   プレイヤー周辺の「判定ウィンドウ」内の子だけを個別に動かす。
+ *   ウィンドウはプレイヤーと一緒に前後左右へ移動し、端から群衆の密度どおりに子が補充される。
+ * - 順位は群衆全体の「先頭」「最後尾」と密度分布から決定論的に求める。
  */
 import { Rng } from './rng';
 
 export const N_TOTAL = 5_812_375;
 export const COURSE = 100; // m
-export const HALF_W = 6.6; // 走路の半幅 (m)
 export const DT = 1 / 60;
+export const X_LIMIT = 400; // 横方向の移動限界（実質無限のグラウンド）
 
 // 群衆（ゲーム的に圧縮した 581 万人の流れ）
-const FRONT0 = 36; // 先頭の初期位置
-const FRONT_V = 2.6; // 先頭の速さ
-const BACK0 = 1.4; // 最後尾（プレイヤーの 1 つ前）の初期位置
-const BACK_V = 1.6;
+export const FRONT0 = 46; // 先頭の初期位置
+export const FRONT_V = 2.3; // 先頭の速さ
+export const BACK0 = 1.4; // 最後尾（プレイヤーの 1 つ前）の初期位置
+export const BACK_V = 1.5;
 const RANK_K = 3; // 順位カーブ（先頭付近ほど人がまばら）
-const DENS_MAX = 0.72; // 最後尾付近の密度 (人/m²)
-const AHEAD = 46; // 前方の生成範囲
-const BEHIND = 14; // 後方の消去範囲
+export const DENS_MAX = 0.66; // 最後尾付近の密度 (人/m²)
+
+// 判定ウィンドウ（この中の子だけ個別に動かす）
+export const NEAR_HW = 11; // 横方向の半幅
+export const AHEAD = 40;
+export const BEHIND = 12;
+const CELL = 2; // 補充チェック用セル
 
 // プレイヤー
 const P_SPEED = 6.0;
 const P_DASH = 8.3;
 const P_ACCEL = 7;
-const P_LAT = 4.4;
+const P_LAT = 4.6;
 const BODY_R = 0.26;
 const STEP_CD = 0.75;
+
+/** 群衆内の相対位置 u（0=先頭, 1=最後尾）における密度係数 0..1 */
+export function densityShape(u: number): number {
+  return 0.16 + 0.84 * Math.pow(u, 1.25);
+}
 
 export const enum NState {
   Run = 0,
@@ -39,7 +50,6 @@ export const enum NState {
 export interface Npc {
   id: number;
   active: boolean;
-  leader: boolean;
   x: number;
   z: number;
   vx: number;
@@ -124,15 +134,15 @@ export class Game {
   finishRank = N_TOTAL;
   leaderPassed = false;
   leaderFinished = false;
-  private spawnEdge = BACK0;
-  private spawnDebt = 0;
-  // 空間グリッド
+  private free: number[] = [];
+  // 空間グリッド（プレイヤー相対、1m セル）
   private readonly cellHead: Int32Array;
   private readonly cellNext: Int32Array;
+  private gridX0 = 0;
   private gridZ0 = 0;
-  static readonly POOL = 320;
-  static readonly GRID_COLS = 16;
-  static readonly GRID_ROWS = 84;
+  static readonly POOL = 900;
+  static readonly GRID_COLS = NEAR_HW * 2 + 6;
+  static readonly GRID_ROWS = AHEAD + BEHIND + 8;
 
   constructor(readonly seed: number) {
     this.rng = new Rng(seed);
@@ -141,7 +151,6 @@ export class Game {
       this.npcs.push({
         id: i,
         active: false,
-        leader: false,
         x: 0,
         z: 0,
         vx: 0,
@@ -158,6 +167,7 @@ export class Game {
         tint: 0,
         bumpCd: 0,
       });
+      this.free.push(Game.POOL - 1 - i);
     }
     this.cellHead = new Int32Array(Game.GRID_COLS * Game.GRID_ROWS);
     this.cellNext = new Int32Array(Game.POOL);
@@ -183,26 +193,21 @@ export class Game {
       bumps: 0,
       wobble: 0,
     };
-    // 先頭ランナー
-    const leader = this.npcs[0];
-    this.activate(leader, 0.4, FRONT0, FRONT_V);
-    leader.leader = true;
-    leader.hat = 2;
-    leader.skill = 1;
     // スタート時の群衆を配置（静止状態）
-    this.fillSpawn(Math.min(FRONT0 - 0.6, AHEAD));
+    this.buildGrid();
+    this.replenish(true);
     for (const n of this.npcs) if (n.active) n.v = 0;
   }
 
   /** 位置 z における群衆内の相対位置 u（0=先頭, 1=最後尾） */
-  private crowdU(z: number): number {
+  crowdU(z: number): number {
     const span = Math.max(1, this.front - this.back);
     return Math.min(1, Math.max(0, (this.front - z) / span));
   }
 
-  private density(z: number): number {
-    const u = this.crowdU(z);
-    return DENS_MAX * (0.16 + 0.84 * Math.pow(u, 1.25));
+  density(z: number): number {
+    if (z < this.back || z > this.front) return 0;
+    return DENS_MAX * densityShape(this.crowdU(z));
   }
 
   private localSpeed(z: number): number {
@@ -222,15 +227,14 @@ export class Game {
     return Math.min(N_TOTAL, Math.max(2, ahead + 1));
   }
 
-  private activate(n: Npc, x: number, z: number, v: number) {
+  private activate(n: Npc, x: number, z: number) {
     const r = this.rng;
     n.active = true;
-    n.leader = false;
     n.x = x;
     n.z = z;
     n.vx = 0;
-    n.baseV = v;
-    n.v = v;
+    n.baseV = this.localSpeed(z) + r.range(-0.35, 0.35);
+    n.v = this.started ? n.baseV : 0;
     n.wander = r.range(-0.4, 0.4);
     n.wanderT = r.range(0.5, 2.5);
     n.skill = r.next();
@@ -243,73 +247,111 @@ export class Game {
     n.bumpCd = 0;
   }
 
-  private freeNpc(): Npc | null {
-    for (let i = 1; i < this.npcs.length; i++) if (!this.npcs[i].active) return this.npcs[i];
-    return null;
+  private release(n: Npc) {
+    n.active = false;
+    this.free.push(n.id);
   }
 
-  /** 群衆の流れに乗って移動する生成境界 spawnEdge から target までを密度に応じて埋める */
-  private fillSpawn(target: number) {
+  /** グリッド上で (x,z) 付近に他の子がいるか */
+  private occupied(x: number, z: number, r: number): boolean {
+    let hit = false;
+    this.forNear(x, z, (m) => {
+      if (hit || !m.active) return;
+      const dx = m.x - x;
+      const dz = m.z - z;
+      if (dx * dx + dz * dz < r * r) hit = true;
+    });
+    return hit;
+  }
+
+  private addToGrid(n: Npc) {
+    const c = this.cellOf(n.x, n.z);
+    if (c < 0) return;
+    this.cellNext[n.id] = this.cellHead[c];
+    this.cellHead[c] = n.id;
+  }
+
+  /**
+   * ウィンドウ端（前・左右・後ろ）のセルを密度どおりに補充する。
+   * all=true のときはウィンドウ全体を埋める（スタート時）。
+   */
+  private replenish(all: boolean) {
+    const p = this.player;
     const r = this.rng;
-    const top = Math.min(target, this.front - 0.6);
-    if (top <= this.spawnEdge) return;
-    const step = 0.5;
-    for (let z0 = this.spawnEdge; z0 < top; z0 += step) {
-      const len = Math.min(step, top - z0);
-      this.spawnDebt += this.density(z0 + len / 2) * len * HALF_W * 2;
-      while (this.spawnDebt >= 1) {
-        this.spawnDebt -= 1;
-        const n = this.freeNpc();
-        if (!n) {
-          this.spawnDebt = 0;
-          break;
-        }
-        let x = 0;
-        let z = 0;
-        let ok = false;
-        for (let tries = 0; tries < 6 && !ok; tries++) {
-          x = r.range(-HALF_W + 0.3, HALF_W - 0.3);
-          z = z0 + r.next() * len;
-          ok = true;
-          for (const m of this.npcs) {
-            if (!m.active) continue;
-            const dx = m.x - x;
-            const dz = m.z - z;
-            if (dx * dx + dz * dz < 0.36) {
-              ok = false;
-              break;
-            }
+    const x0 = Math.floor((p.x - NEAR_HW) / CELL) * CELL;
+    const z0 = Math.floor((p.z - BEHIND) / CELL) * CELL;
+    const cols = Math.ceil((NEAR_HW * 2) / CELL) + 1;
+    const rows = Math.ceil((AHEAD + BEHIND) / CELL) + 1;
+    for (let j = 0; j < rows; j++) {
+      const cz = z0 + j * CELL;
+      for (let i = 0; i < cols; i++) {
+        const edge = j <= 0 || j >= rows - 2 || i <= 0 || i >= cols - 1;
+        if (!all && !edge) continue;
+        const cx = x0 + i * CELL;
+        // ウィンドウ外は対象外
+        if (cx + CELL < p.x - NEAR_HW || cx > p.x + NEAR_HW) continue;
+        if (cz + CELL < p.z - BEHIND || cz > p.z + AHEAD) continue;
+        const d = this.density(cz + CELL / 2);
+        if (d <= 0) continue;
+        const expected = d * CELL * CELL;
+        let have = 0;
+        this.forCell(cx, cz, () => have++);
+        let need = expected - have;
+        if (need <= 0) continue;
+        // 端数は確率で
+        let k = Math.floor(need);
+        need -= k;
+        if (r.chance(need)) k++;
+        for (; k > 0; k--) {
+          if (this.free.length === 0) return;
+          let ok = false;
+          let x = 0;
+          let z = 0;
+          for (let tries = 0; tries < 5 && !ok; tries++) {
+            x = cx + r.next() * CELL;
+            z = cz + r.next() * CELL;
+            if (z < this.back || z > this.front - 0.3) continue;
+            ok = !this.occupied(x, z, 0.62);
           }
+          if (!ok) break;
+          const n = this.npcs[this.free.pop()!];
+          this.activate(n, x, z);
+          this.addToGrid(n);
         }
-        const v = this.localSpeed(z) + r.range(-0.35, 0.35);
-        this.activate(n, x, z, v);
       }
     }
-    this.spawnEdge = top;
   }
 
   private buildGrid() {
     this.cellHead.fill(-1);
-    this.gridZ0 = this.player.z - BEHIND - 2;
-    for (const n of this.npcs) {
-      if (!n.active) continue;
-      const c = this.cellOf(n.x, n.z);
-      if (c < 0) continue;
-      this.cellNext[n.id] = this.cellHead[c];
-      this.cellHead[c] = n.id;
-    }
+    this.gridX0 = Math.floor(this.player.x) - NEAR_HW - 3;
+    this.gridZ0 = Math.floor(this.player.z) - BEHIND - 4;
+    for (const n of this.npcs) if (n.active) this.addToGrid(n);
   }
 
   private cellOf(x: number, z: number): number {
-    const col = Math.floor(x + 8);
+    const col = Math.floor(x - this.gridX0);
     const row = Math.floor(z - this.gridZ0);
     if (col < 0 || col >= Game.GRID_COLS || row < 0 || row >= Game.GRID_ROWS) return -1;
     return row * Game.GRID_COLS + col;
   }
 
+  /** 1m グリッドで (cx,cz) から CELL 四方に入る子を列挙 */
+  private forCell(cx: number, cz: number, fn: (m: Npc) => void) {
+    const c0 = Math.floor(cx - this.gridX0);
+    const r0 = Math.floor(cz - this.gridZ0);
+    for (let r = r0; r < r0 + CELL; r++) {
+      if (r < 0 || r >= Game.GRID_ROWS) continue;
+      for (let c = c0; c < c0 + CELL; c++) {
+        if (c < 0 || c >= Game.GRID_COLS) continue;
+        for (let id = this.cellHead[r * Game.GRID_COLS + c]; id >= 0; id = this.cellNext[id]) fn(this.npcs[id]);
+      }
+    }
+  }
+
   /** 近傍 NPC を列挙 */
   private forNear(x: number, z: number, fn: (m: Npc) => void) {
-    const col = Math.floor(x + 8);
+    const col = Math.floor(x - this.gridX0);
     const row = Math.floor(z - this.gridZ0);
     for (let r = row - 1; r <= row + 2; r++) {
       if (r < 0 || r >= Game.GRID_ROWS) continue;
@@ -347,14 +389,15 @@ export class Game {
 
     this.front += FRONT_V * DT;
     this.back += BACK_V * DT;
-    this.spawnEdge += this.localSpeed(this.spawnEdge) * DT;
-    this.fillSpawn(this.player.z + AHEAD);
 
     this.buildGrid();
     this.updateNpcs();
     this.updatePlayer(input);
+    if (this.steps % 4 === 0) {
+      this.buildGrid();
+      this.replenish(false);
+    }
 
-    // 先頭関連のイベント
     if (!this.leaderPassed && this.player.z > this.front) {
       this.leaderPassed = true;
       this.events.push({ type: 'passLeader' });
@@ -376,8 +419,9 @@ export class Game {
     const er = this.evRng;
     for (const n of this.npcs) {
       if (!n.active) continue;
-      if (n.z < p.z - BEHIND) {
-        n.active = false;
+      // ウィンドウ外に出た子は群衆（中景）に戻す
+      if (n.z < p.z - BEHIND - 1 || n.z > p.z + AHEAD + 3 || Math.abs(n.x - p.x) > NEAR_HW + 1) {
+        this.release(n);
         continue;
       }
       n.bumpCd = Math.max(0, n.bumpCd - DT);
@@ -392,7 +436,7 @@ export class Game {
           let steer = n.wander;
           // 前方確認：詰まり・転倒者の回避
           this.forNear(n.x, n.z, (m) => {
-            if (m === n) return;
+            if (m === n || !m.active) return;
             const dz = m.z - n.z;
             const dx = m.x - n.x;
             if (dz <= 0 || dz > 2.6) return;
@@ -403,17 +447,12 @@ export class Game {
               steer += dx > 0 ? -0.6 : 0.6;
             }
           });
-          if (n.leader) {
-            targetV = FRONT_V;
-            steer = -n.x * 0.5;
-          } else if (n.z > this.front - 0.35) {
-            targetV = Math.min(targetV, FRONT_V * 0.97);
-          }
+          if (n.z > this.front - 0.35) targetV = Math.min(targetV, FRONT_V * 0.97);
           n.v += Math.max(-6 * DT, Math.min(2.5 * DT, targetV - n.v));
           n.vx += (steer * 1.1 - n.vx) * Math.min(1, 6 * DT);
           // 自然なつまずき（前兆あり）
           const crowd = this.density(n.z) / DENS_MAX;
-          if (!n.leader && er.chance((0.006 + 0.012 * crowd) * DT)) this.stumble(n);
+          if (er.chance((0.006 + 0.012 * crowd) * DT)) this.stumble(n);
           break;
         }
         case NState.Stumble:
@@ -446,14 +485,6 @@ export class Game {
       }
       n.z += n.v * DT;
       n.x += n.vx * DT;
-      if (n.leader) n.z = Math.min(n.z, this.front);
-      if (n.x < -HALF_W + 0.25) {
-        n.x = -HALF_W + 0.25;
-        n.vx = Math.abs(n.vx) * 0.3;
-      } else if (n.x > HALF_W - 0.25) {
-        n.x = HALF_W - 0.25;
-        n.vx = -Math.abs(n.vx) * 0.3;
-      }
       n.phase += (n.v * 2.6 + 0.2) * DT;
     }
 
@@ -490,7 +521,7 @@ export class Game {
           const ez = runner.z - hz;
           if (ex * ex + ez * ez < 0.55 * 0.55 && runner.z < hz && runner.state === NState.Run && runner.bumpCd <= 0) {
             runner.bumpCd = 0.8;
-            if (er.chance(runner.leader ? 0.05 : 0.8 - runner.skill * 0.35)) this.fall(runner, true);
+            if (er.chance(0.8 - runner.skill * 0.35)) this.fall(runner, true);
           }
         }
       });
@@ -564,7 +595,7 @@ export class Game {
 
     p.z += p.v * DT;
     p.x += p.vx * DT;
-    p.x = Math.max(-HALF_W + BODY_R, Math.min(HALF_W - BODY_R, p.x));
+    p.x = Math.max(-X_LIMIT, Math.min(X_LIMIT, p.x));
     p.phase += (p.v * 2.5 + 0.2) * DT;
 
     if (p.state !== PState.Run) return;
@@ -609,7 +640,7 @@ export class Game {
         p.wobble = 0.6;
         this.events.push({ type: 'bump', x: n.x, z: n.z });
         // ぶつかられた子もよろける → 連鎖のきっかけ
-        if (!n.leader && er.chance(0.35)) this.stumble(n);
+        if (er.chance(0.35)) this.stumble(n);
       }
     });
 
