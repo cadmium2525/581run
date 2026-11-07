@@ -182,6 +182,12 @@ export class Sfx {
     src.stop(t + dur + 0.02);
   }
 
+  /** カメラのシャッター（カシャッ） */
+  shutter() {
+    this.noise(0.025, 0.7, 4200, 1.5);
+    this.tone(2400, 0.02, 'square', 0.12);
+    this.noise(0.07, 0.5, 1800, 1.2, 0.045);
+  }
   beep(high = false) {
     this.tone(high ? 1320 : 880, 0.18, 'square', 0.12);
   }

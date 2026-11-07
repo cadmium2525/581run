@@ -11,6 +11,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { AHEAD, BEHIND, COURSE, Game, NEAR_HW, NState, PState, densityShape, type GameEvent } from './game';
 
 export type Quality = 'low' | 'auto' | 'high';
+export type SnapView = 'share' | 'face' | 'side' | 'high';
 
 const SKY = 0xc4e4ff;
 const HAT_COLORS = [new THREE.Color(0xe63b3b), new THREE.Color(0xf7f7f2), new THREE.Color(0xffc21a)];
@@ -36,6 +37,7 @@ const P_LEG_L = 4;
 const P_LEG_R = 5;
 const P_ARM_L = 6;
 const P_ARM_R = 7;
+const P_FACE = 8;
 
 interface Part {
   geo: THREE.BufferGeometry;
@@ -61,7 +63,20 @@ function makeParts(): Part[] {
     { geo: box(0.11, 0.56, 0.12, 0, -0.28), color: SKIN, instanceColor: false },
     { geo: box(0.08, 0.38, 0.08, 0, -0.17), color: SKIN, instanceColor: false },
     { geo: box(0.08, 0.38, 0.08, 0, -0.17), color: SKIN, instanceColor: false },
+    { geo: faceGeometry(), color: 0x2a1a12, instanceColor: false },
   ];
+}
+
+/** 顔（目と口）。頭の中心が原点、+z が正面 */
+function faceGeometry() {
+  const eye = (x: number) => {
+    const g = new THREE.BoxGeometry(0.032, 0.05, 0.02);
+    g.translate(x, 0.025, 0.142);
+    return g.toNonIndexed();
+  };
+  const mouth = new THREE.BoxGeometry(0.07, 0.022, 0.02);
+  mouth.translate(0, -0.055, 0.138);
+  return mergeGeometries([eye(0.055), eye(-0.055), mouth.toNonIndexed()])!;
 }
 
 interface Pose {
@@ -105,6 +120,7 @@ function partMatrices(pose: Pose, out: THREE.Matrix4[]) {
   set(P_TORSO, 0, hipY + 0.26, 0, 0);
   set(P_SHORTS, 0, hipY + 0.02, 0, 0);
   set(P_HEAD, 0, hipY + 0.6, 0.01, 0);
+  set(P_FACE, 0, hipY + 0.6, 0.01, 0);
   set(P_HAT, 0, hipY + 0.64, 0.0, -0.08);
   const splay = pose.fall * 0.35;
   set(P_LEG_L, 0.085, hipY, 0, sw, splay);
@@ -203,6 +219,8 @@ export class Renderer {
   private shake = 0;
   private clock = 0;
   quality: Quality = 'auto';
+  /** 1位でゴールした瞬間のポーズ（バンザイ） */
+  victory = false;
   private pixelRatio = 1;
   private fpsAcc = 0;
   private fpsFrames = 0;
@@ -258,7 +276,7 @@ export class Renderer {
     this.scene.add(this.hazard);
 
     // プレイヤー（オレンジのシャツ＋青い帽子）
-    const pColors = [0xff7a1a, SHORTS, 0xf4c9a0, 0x2fa8ff, SKIN, SKIN, SKIN, SKIN];
+    const pColors = [0xff7a1a, SHORTS, 0xf4c9a0, 0x2fa8ff, SKIN, SKIN, SKIN, SKIN, 0x2a1a12];
     parts.forEach((p, i) => {
       const mesh = new THREE.Mesh(p.geo, new THREE.MeshLambertMaterial({ color: pColors[i] }));
       mesh.matrixAutoUpdate = false;
@@ -741,7 +759,13 @@ export class Renderer {
     pose.roll = p.wobble > 0 ? Math.sin(this.clock * 30) * 0.25 * p.wobble : 0;
     pose.armUp = p.hopT > 0 ? 0.5 : p.wobble * 0.5;
     pose.fall = 0;
-    if (p.state === PState.Fallen) {
+    if (this.victory) {
+      // ゴールの瞬間のバンザイ
+      pose.armUp = 1;
+      pose.lean = -0.08;
+      pose.roll = 0;
+      pose.swing *= 0.6;
+    } else if (p.state === PState.Fallen) {
       pose.fall = 1;
       pose.swing = 0.2;
       pose.bob = 0;
@@ -750,7 +774,7 @@ export class Renderer {
       pose.fall = p.t / 0.45;
     }
     partMatrices(pose, this.playerMats);
-    const blink = p.iframe > 0 && p.state === PState.Run && Math.floor(this.clock * 16) % 2 === 0;
+    const blink = !this.victory && p.iframe > 0 && p.state === PState.Run && Math.floor(this.clock * 16) % 2 === 0;
     for (let k = 0; k < this.playerParts.length; k++) {
       this.playerParts[k].matrix.copy(this.playerMats[k]);
       this.playerParts[k].visible = !blink;
@@ -816,11 +840,21 @@ export class Renderer {
    * シェア用の写真：プレイヤーの正面から、後ろに続く大群衆ごと撮る。
    * WebGL の描画直後に同じタスク内でコピーするので preserveDrawingBuffer は不要。
    */
-  snapshot(game: Game, w = 1200, h = 630): HTMLCanvasElement {
+  snapshot(game: Game, w = 1200, h = 630, view: SnapView = 'share'): HTMLCanvasElement {
     const p = game.player;
-    const cam = new THREE.PerspectiveCamera(48, w / h, 0.1, 1600);
-    cam.position.set(-p.x - 1.6, 3.6, p.z + 5.6);
-    cam.lookAt(-p.x + 0.7, 0.7, p.z - 7);
+    const X = -p.x;
+    const Y = p.y;
+    const V: Record<SnapView, { fov: number; pos: [number, number, number]; look: [number, number, number] }> = {
+      share: { fov: 48, pos: [X - 1.6, 3.6, p.z + 5.6], look: [X + 0.7, 0.7, p.z - 7] },
+      // カットイン用：顔のドアップ／横からのローアングル／斜め上から群衆ごと
+      face: { fov: 34, pos: [X + 0.35, 1.32 + Y, p.z + 1.25], look: [X - 0.05, 1.2 + Y, p.z] },
+      side: { fov: 42, pos: [X - 2.1, 0.45 + Y, p.z + 1.7], look: [X, 1.0 + Y, p.z - 0.2] },
+      high: { fov: 50, pos: [X + 2.2, 3.4, p.z + 3.4], look: [X - 0.4, 0.6, p.z - 5] },
+    };
+    const v = V[view];
+    const cam = new THREE.PerspectiveCamera(v.fov, w / h, 0.05, 1600);
+    cam.position.set(...v.pos);
+    cam.lookAt(...v.look);
     const ratio = this.renderer.getPixelRatio();
     const uScale = this.farMat.uniforms.uScale.value;
     this.playerMarker.visible = false;
@@ -843,6 +877,7 @@ export class Renderer {
 
   /** リトライ時にカメラを即座に移動 */
   snapCamera(game: Game) {
+    this.victory = false;
     const p = game.player;
     const portrait = this.width < this.height;
     this.camPos.set(-p.x, portrait ? 7.2 : 5.8, p.z - 7.4);

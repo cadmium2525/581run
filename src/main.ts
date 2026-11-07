@@ -99,6 +99,8 @@ function newGame(m: Mode) {
 }
 
 function startRace(m: Mode) {
+  if (cutTimers.length) endCutIn();
+  $('cutin').classList.add('hidden');
   sfx.unlock();
   newGame(m);
   sfx.stopBgm(0.2);
@@ -199,7 +201,13 @@ function finishRace() {
   sfx.stopBgm(0.8);
   const t = game.time;
   const cleared = game.cleared;
-  sfx.fanfare(cleared);
+  let cutShots: HTMLCanvasElement[] = [];
+  if (cleared) {
+    // 1位：バンザイのポーズにして、3 つの視点から撮る
+    renderer.victory = true;
+    renderer.render(game, 0);
+    cutShots = (['face', 'side', 'high'] as const).map((v) => renderer.snapshot(game, 960, 540, v));
+  } else sfx.fanfare(false);
   // シェア画像（ゴールの瞬間を正面から撮った写真＋記録）
   const shot = renderer.snapshot(game);
   let isNew = false;
@@ -230,9 +238,58 @@ function finishRace() {
     : `${fmtRank(passed)}人抜き！ 先頭より先にゴールすればクリア。もう一回！`;
   $('shareNote').textContent = '';
   makeCard(shot, best, isNew);
-  setTimeout(() => {
-    if (scene === 'result') show('result');
-  }, 900);
+  if (cleared) playCutIn(cutShots);
+  else
+    setTimeout(() => {
+      if (scene === 'result') show('result');
+    }, 900);
+}
+
+/** 1位ゴールの演出：パシャッ・パシャッ・パシャッ！と 3 視点のドアップを重ねる */
+let cutTimers: number[] = [];
+function playCutIn(shots: HTMLCanvasElement[]) {
+  const root = $('cutin');
+  const flash = $('cutFlash');
+  root.querySelectorAll('.cut, .stamp').forEach((e) => e.remove());
+  root.classList.remove('hidden', 'dim');
+  $('hud').classList.add('hidden');
+  $('controls').classList.add('hidden');
+  const at = (ms: number, fn: () => void) => cutTimers.push(window.setTimeout(fn, ms));
+  const doFlash = () => {
+    flash.classList.remove('on');
+    void flash.offsetWidth; // アニメーションをやり直す
+    flash.classList.add('on');
+  };
+  shots.forEach((cv, i) =>
+    at(120 + i * 380, () => {
+      const d = document.createElement('div');
+      d.className = `cut c${i + 1}`;
+      d.appendChild(cv);
+      root.appendChild(d);
+      root.classList.add('dim');
+      doFlash();
+      sfx.shutter();
+      if (navigator.vibrate) navigator.vibrate(20);
+    }),
+  );
+  at(120 + 3 * 380 + 120, () => {
+    const s = document.createElement('div');
+    s.className = 'stamp';
+    s.innerHTML = '1位!!<small>GOAL</small>';
+    root.appendChild(s);
+    sfx.fanfare(true);
+  });
+  at(3400, endCutIn);
+  root.onclick = () => {
+    if (cutTimers.length) endCutIn();
+  };
+}
+
+function endCutIn() {
+  cutTimers.forEach((t) => clearTimeout(t));
+  cutTimers = [];
+  $('cutin').classList.add('hidden');
+  if (scene === 'result') show('result');
 }
 
 function modeLabel(): string {

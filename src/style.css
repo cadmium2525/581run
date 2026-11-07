@@ -449,3 +449,113 @@ h2 {
 .btn:disabled {
   opacity: 0.5;
 }
+
+/* 1位ゴールのカットイン */
+#cutin {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  z-index: 20;
+  background: rgba(10, 15, 40, 0);
+  transition: background 0.3s;
+}
+#cutin.dim {
+  background: rgba(10, 15, 40, 0.45);
+}
+#cutin .cut {
+  position: absolute;
+  width: min(86vw, 64vh);
+  aspect-ratio: 16 / 9;
+  border: 5px solid #fff;
+  box-shadow: 0 10px 0 rgba(0, 0, 0, 0.25), 0 0 0 2px #111;
+  background: #000;
+  transform: rotate(var(--r));
+  animation: cutL 0.2s cubic-bezier(0.2, 1.4, 0.4, 1) both;
+}
+#cutin .cut canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+#cutin .cut.c1 {
+  top: 4%;
+  left: 4%;
+  --r: -3deg;
+}
+#cutin .cut.c2 {
+  top: 33%;
+  right: 4%;
+  --r: 2.5deg;
+  animation-name: cutR;
+}
+#cutin .cut.c3 {
+  top: 60%;
+  left: 9%;
+  --r: -2deg;
+}
+@keyframes cutL {
+  from {
+    transform: translateX(-130%) rotate(var(--r)) scale(1.25);
+  }
+  to {
+    transform: translateX(0) rotate(var(--r)) scale(1);
+  }
+}
+@keyframes cutR {
+  from {
+    transform: translateX(130%) rotate(var(--r)) scale(1.25);
+  }
+  to {
+    transform: translateX(0) rotate(var(--r)) scale(1);
+  }
+}
+#cutin .flash {
+  position: absolute;
+  inset: 0;
+  background: #fff;
+  opacity: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+#cutin .flash.on {
+  animation: flash 0.3s ease-out;
+}
+@keyframes flash {
+  from {
+    opacity: 0.95;
+  }
+  to {
+    opacity: 0;
+  }
+}
+#cutin .stamp {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 40%;
+  text-align: center;
+  z-index: 3;
+  font-size: clamp(56px, 16vw, 120px);
+  font-weight: 900;
+  color: #ffd23f;
+  -webkit-text-stroke: 3px #c0392b;
+  text-shadow: 0 6px 0 #c0392b, 0 0 30px rgba(255, 210, 63, 0.8);
+  animation: stamp 0.35s cubic-bezier(0.2, 1.6, 0.4, 1) both;
+}
+#cutin .stamp small {
+  display: block;
+  font-size: 0.32em;
+  color: #fff;
+  -webkit-text-stroke: 0;
+  text-shadow: 0 3px 0 #c0392b;
+}
+@keyframes stamp {
+  from {
+    transform: scale(2.4) rotate(-8deg);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1) rotate(-4deg);
+    opacity: 1;
+  }
+}
