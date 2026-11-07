@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#bfe3ff" />
+    <meta name="description" content="581万人の小学生が一斉に走る100m走。最下位から、1位へ。転ぶな、抜けろ、駆け抜けろ。" />
+    <meta property="og:title" content="581万人100m走" />
+    <meta property="og:description" content="最下位から、1位へ。転ぶな、抜けろ、駆け抜けろ。" />
+    <title>581万人100m走</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='36' r='22' fill='%23e63b3b'/%3E%3Crect x='10' y='34' width='44' height='6' fill='%23fff'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <canvas id="gl"></canvas>
+    <div id="touch"></div>
+
+    <!-- レース中 HUD -->
+    <div id="hud" class="hidden">
+      <div class="hud-top">
+        <div class="hud-time" id="hudTime">0.000</div>
+        <button id="pauseBtn" class="icon-btn" aria-label="一時停止">II</button>
+      </div>
+      <div class="hud-rank"><span id="hudRank">5,812,375</span><small>位</small></div>
+      <div class="hud-dist">残り <b id="hudDist">100.0</b>m</div>
+      <div class="progress">
+        <div class="progress-leader" id="progLeader"></div>
+        <div class="progress-me" id="progMe"></div>
+      </div>
+      <div class="gauges">
+        <div class="gauge"><label>バランス</label><div class="bar"><i id="balBar"></i></div></div>
+        <div class="gauge"><label>スタミナ</label><div class="bar stamina"><i id="staBar"></i></div></div>
+      </div>
+      <div id="toast" class="toast"></div>
+      <div id="countdown" class="countdown"></div>
+    </div>
+
+    <!-- タッチ操作 -->
+    <div id="controls" class="hidden">
+      <div class="hint-zone left">◀</div>
+      <div class="ctrl-buttons">
+        <button id="dashBtn" class="ctrl dash">ダッシュ</button>
+        <button id="stepBtn" class="ctrl step">ステップ</button>
+      </div>
+      <div class="hint-zone right">▶</div>
+    </div>
+
+    <!-- タイトル -->
+    <div id="title" class="screen">
+      <div class="panel title-panel">
+        <p class="kicker">5,812,375人が一斉スタート</p>
+        <h1><span class="big">581</span>万人<br />100m走</h1>
+        <p class="tagline">最下位から、1位へ。<br />転ぶな、抜けろ、駆け抜けろ。</p>
+        <button id="playDaily" class="btn primary">PLAY <small id="dailyLabel">今日のレース</small></button>
+        <button id="playFree" class="btn">フリーラン <small>毎回ちがうコース</small></button>
+        <div class="row">
+          <button id="howBtn" class="btn small">操作説明</button>
+          <button id="settingsBtn" class="btn small">設定</button>
+        </div>
+        <p class="best" id="bestLabel"></p>
+      </div>
+    </div>
+
+    <!-- 操作説明 -->
+    <div id="how" class="screen hidden">
+      <div class="panel">
+        <h2>あそびかた</h2>
+        <p>あなたは <b>5,812,375位（最後尾）</b> からスタート。自動で前に進みます。人をよけて追い抜き、先頭より先にゴールすればクリア！</p>
+        <table class="ops">
+          <tr><th></th><th>スマホ</th><th>PC</th></tr>
+          <tr><td>左右移動</td><td>画面の左／右を長押し・ドラッグ</td><td>A・D／←・→</td></tr>
+          <tr><td>回避</td><td>ステップボタン</td><td>スペース</td></tr>
+          <tr><td>ダッシュ</td><td>ダッシュボタン（スタミナ）</td><td>Shift</td></tr>
+          <tr><td>一時停止</td><td>右上の II</td><td>Esc</td></tr>
+        </table>
+        <ul class="tips">
+          <li><b>回避</b>：左右を押しながら → すばやく横ステップ。何も押さずに → ぴょんとジャンプして <b>転んだ子を飛びこえる</b>。</li>
+          <li>ぶつかると <b>バランス</b> が減り、0 になると転んでタイムロス。</li>
+          <li>頭の上に <b class="warn">！</b> が出た子は転びそう。<b class="danger">赤い輪</b> は転んだ子の危険ゾーン。</li>
+          <li>転んだ子に後ろの子がつまずいて、<b>転倒が連鎖</b> します。先を読もう。</li>
+        </ul>
+        <button class="btn primary back">OK</button>
+      </div>
+    </div>
+
+    <!-- 設定 -->
+    <div id="settings" class="screen hidden">
+      <div class="panel">
+        <h2>設定</h2>
+        <div class="setting">
+          <label>画質</label>
+          <div class="seg" id="qualitySeg">
+            <button data-v="low">低</button><button data-v="auto">自動</button><button data-v="high">高</button>
+          </div>
+        </div>
+        <div class="setting">
+          <label>効果音</label>
+          <div class="seg" id="soundSeg"><button data-v="on">ON</button><button data-v="off">OFF</button></div>
+        </div>
+        <p class="note">画質「自動」は動作が重いと描画数・解像度を自動で下げます。画質はゲームの難しさに影響しません。</p>
+        <button class="btn primary back">もどる</button>
+      </div>
+    </div>
+
+    <!-- 一時停止 -->
+    <div id="pause" class="screen hidden">
+      <div class="panel">
+        <h2>一時停止</h2>
+        <button id="resumeBtn" class="btn primary">再開</button>
+        <button id="retryBtn" class="btn">リトライ</button>
+        <button id="toTitleBtn" class="btn">タイトルへ</button>
+      </div>
+    </div>
+
+    <!-- リザルト -->
+    <div id="result" class="screen hidden">
+      <div class="panel result-panel">
+        <p class="kicker" id="resMode"></p>
+        <h2 id="resHead">CLEAR!</h2>
+        <div class="res-time" id="resTime">00.000<small>秒</small></div>
+        <div class="res-new hidden" id="resNew">自己ベスト更新！</div>
+        <dl class="res-stats">
+          <div><dt>順位</dt><dd id="resRank">1位</dd></div>
+          <div><dt>転倒</dt><dd id="resFalls">0回</dd></div>
+          <div><dt>自己ベスト</dt><dd id="resBest">-</dd></div>
+        </dl>
+        <p class="res-msg" id="resMsg"></p>
+        <button id="againBtn" class="btn primary">もう一回 <small>(R)</small></button>
+        <div class="row">
+          <button id="shareBtn" class="btn small">結果をシェア</button>
+          <button id="resTitleBtn" class="btn small">タイトル</button>
+        </div>
+        <p class="note" id="shareNote"></p>
+      </div>
+    </div>
+
+    <div id="rotateHint" class="hidden">縦持ちでも横持ちでも遊べます</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

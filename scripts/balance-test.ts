@@ -1,0 +1,30 @@
+// 簡易ボットで難易度を確認する (npx vite-node 不要: esbuild で実行)
+import { Game, NState, COURSE } from '../src/game';
+function bot(g: Game, smart: boolean) {
+  const p = g.player;
+  let best = 0, bestScore = -1e9;
+  for (const cand of [-1, -0.5, 0, 0.5, 1]) {
+    const tx = p.x + cand * 1.2;
+    let score = -Math.abs(cand) * 0.2;
+    for (const n of g.npcs) {
+      if (!n.active) continue;
+      const dz = n.z - p.z; if (dz < -0.3 || dz > 3.5) continue;
+      const dx = Math.abs(n.x - tx);
+      if (dx < 0.7) score -= (n.state === NState.Fallen ? 5 : 2) / (0.5 + dz);
+    }
+    if (score > bestScore) { bestScore = score; best = cand; }
+  }
+  let hazard = false;
+  for (const n of g.npcs) if (n.active && n.state === NState.Fallen && n.z - p.z > 0.3 && n.z - p.z < 1.2 && Math.abs(n.x - p.x) < 0.6) hazard = true;
+  return { steer: smart ? best : (Math.random() - 0.5), step: smart && hazard, dash: smart && p.stamina > 0.5 };
+}
+for (const smart of [true, false]) {
+  let clears = 0, tsum = 0, falls = 0; const R = 40;
+  for (let s = 1; s <= R; s++) {
+    const g = new Game(s * 7919); g.start();
+    while (!g.finished && g.time < 60) g.update(bot(g, smart));
+    if (g.cleared) clears++; tsum += g.time; falls += g.player.falls;
+  }
+  console.log(smart ? 'smart' : 'random', 'clear', clears + '/' + R, 'avgT', (tsum / R).toFixed(2), 'avgFalls', (falls / R).toFixed(2), 'course', COURSE);
+}
+{ const g = new Game(1); console.log('npcs at start', g.npcs.filter(n => n.active).length, 'rank', g.rank()); }

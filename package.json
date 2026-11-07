@@ -1,0 +1,20 @@
+{
+  "name": "581run",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "balance": "npx --yes esbuild@0.24.2 scripts/balance-test.ts --bundle --platform=node --outfile=node_modules/.cache/balance.cjs --log-level=warning && node node_modules/.cache/balance.cjs"
+  },
+  "dependencies": {
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.170.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.3.5"
+  }
+}
